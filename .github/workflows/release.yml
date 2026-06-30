@@ -1,32 +1,29 @@
 #
-# Build and publish otel-php-agent GitHub Releases.
+# Build and publish otel-php-agent GitHub Releases, all natively on GitHub
+# hosted runners (no Docker / builder images).
 #
-# Produces, per (platform, arch), a self-contained release tarball matching the
+# Produces, per architecture, a self-contained release tarball matching the
 # contract documented in README.md and consumed by agent/install.sh:
 #
-#   otel-php-agent_<version>_<os>_<arch>[_musl].tar.gz
-#   otel-php-agent_<version>_<os>_<arch>[_musl].tar.gz.sha256
+#   otel-php-agent_<version>_linux_<arch>.tar.gz
+#   otel-php-agent_<version>_linux_<arch>.tar.gz.sha256
 #
-# Per platform/arch the workflow:
-#   1. builds the agent extension for every supported PHP version inside the
-#      matching `make-php` builder image (each run stages a
-#      newrelic-<PHP_API_VERSION>[-zts].so into releases/<os>/agent/<arch>/ via
-#      `make agent-for-release`),
-#   2. builds the libc-matched `newrelic-install` + `newrelic-iutil` (C helper)
-#      and the Go daemon inside the matching builder images,
-#   3. assembles the bundle with `make release-tarball` on the host (which
-#      only *stages* already-built artifacts — it never rebuilds the agent or
-#      daemon on the assemble runner, so a gnu/amd64 host never pollutes a
-#      musl/arm64 bundle),
-#   4. uploads the tarball + sha256 as a job artifact.
+# Per arch the workflow:
+#   1. builds the agent C extension for every supported PHP version on the
+#      matching hosted runner (PHP provided by shivammathur/setup-php), each
+#      run staging a `newrelic-<PHP_API_VERSION>.so` into a per-job artifact,
+#   2. (assemble) builds the libc/arch-matched `newrelic-install` +
+#      `newrelic-iutil` (C helper) and the Go daemon natively on the same
+#      runner, drops all the staged agent .so files into the bundle, then runs
+#      `make release-tarball` (which only *stages* already-built artifacts),
+#   3. uploads the tarball + sha256 as a job artifact.
 #
 # A final `publish` job downloads every asset and creates the GitHub Release
 # (auto on tag push `v*`, or draft on manual dispatch).
 #
-# Required repo configuration (same as the existing build workflows):
-#   vars.MAKE_PHP_VERSION, vars.MAKE_GO_VERSION
-#   secrets.DOCKERHUB_USERNAME, secrets.DOCKERHUB_TOKEN
-#   contents: write (granted below) for release creation
+# v1 limitation: only glibc (gnu) Linux tarballs are produced (linux_amd64,
+# linux_arm64). musl/Alpine tarballs are not built natively — there is no
+# native musl GitHub runner; revisit if Alpine support is needed.
 #
 name: release
 run-name: Release ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -54,109 +51,195 @@ on:
         default: true
         type: boolean
 
+# Build dependencies installed via apt (kept aligned across the agent- and
+# assemble-runner jobs). protobuf-c (libprotobuf-c.a + protoc-c) and libpcre
+# are the two real native deps of axiom / the agent extension.
+# libpcre is built statically from source (see build-agent) so the agent
+# extension embeds it and has no libpcre runtime dependency — Debian's
+# libpcre soname is libpcre.so.3 while RHEL's is libpcre.so.1, so a
+# shared-linked extension built on Ubuntu would not load on RHEL.
+env:
+  APT_DEPS_AGENT: >-
+    build-essential make git autoconf automake libtool pkg-config gawk
+    libprotobuf-c-dev protobuf-c-compiler ca-certificates curl
+  APT_DEPS_ASSEMBLE: >-
+    build-essential make git pkg-config
+  # pcre 8.x (the pcre1 ABI axiom links against). Pinned so the release
+  # is reproducible; bump here when updating.
+  PCRE_VERSION: "8.45"
+  PCRE_URL: "https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz/download"
+
 jobs:
-  build:
-    name: build (${{ matrix.platform }}, ${{ matrix.arch }})
+  meta:
+    name: resolve PHP matrix
+    runs-on: ubuntu-latest
+    outputs:
+      # JSON array of {arch, php} combos (arch-appropriate PHP version lists).
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout php_versions.mk
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
+        with:
+          sparse-checkout: make/php_versions.mk
+      - name: Build arch x PHP matrix
+        id: matrix
+        run: |
+          amd64=$(make -f make/php_versions.mk php-versions-json ARCH=amd64)
+          arm64=$(make -f make/php_versions.mk php-versions-json ARCH=arm64)
+          echo "amd64 PHP versions: $amd64"
+          echo "arm64 PHP versions: $arm64"
+          matrix=$(jq -nc \
+            --argjson a "$amd64" \
+            --argjson b "$arm64" \
+            '($a | map({arch:"amd64", php:.})) + ($b | map({arch:"arm64", php:.}))')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build-agent:
+    name: agent (${{ matrix.arch }} PHP ${{ matrix.php }})
+    needs: meta
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        # platform ∈ {gnu, musl} maps to the builder image tag segment and to
-        # the release RELEASE_OS (linux / linux-musl).
-        platform: [gnu, musl]
-        arch: [amd64, arm64]
-    env:
-      IMAGE_NAME: newrelic/nr-php-agent-builder
-      MAKE_PHP_VERSION: ${{ vars.MAKE_PHP_VERSION }}
-      MAKE_GO_VERSION: ${{ vars.MAKE_GO_VERSION }}
+        include: ${{ fromJson(needs.meta.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
-      - name: Compute release identity
+      - name: Map arch to internal release.mk arch name
+        id: arch
+        run: |
+          case "${{ matrix.arch }}" in
+            amd64) int=x64 ;;
+            arm64) int=aarch64 ;;
+          esac
+          echo "int=$int" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.APT_DEPS_AGENT }}
+
+      - name: Build static libpcre (portable extension linkage)
+        run: |
+          set -e
+          mkdir -p pcre && cd pcre
+          curl -fsSL -o pcre.tar.gz "${PCRE_URL}"
+          tar xzf pcre.tar.gz
+          cd "pcre-${PCRE_VERSION}"
+          ./configure \
+            --prefix="$PWD/../pcre-prefix" \
+            --disable-shared --enable-static \
+            --enable-unicode-properties --enable-jit --with-pic
+          make -j"$(nproc 2>/dev/null || echo 2)"
+          make install
+          # Make this pcre's pcre-config the one axiom (which calls bare
+          # `pcre-config`) picks up, so its headers match the static lib.
+          echo "$PWD/../pcre-prefix/bin" >> "$GITHUB_PATH"
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+
+      - name: Build agent (stages newrelic-<phpapi>.so)
+        run: |
+          make agent-for-release \
+            RELEASE_OS=linux \
+            RELEASE_ARCH=${{ steps.arch.outputs.int }} \
+            PCRE_PREFIX="$PWD/pcre/pcre-prefix" \
+            PCRE_STATIC=yes
+
+      - name: Save staged extension
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: agent-so-${{ matrix.arch }}-${{ matrix.php }}
+          path: releases/linux/agent/${{ steps.arch.outputs.int }}/
+          if-no-files-found: error
+
+  assemble:
+    name: assemble (${{ matrix.arch }})
+    needs: build-agent
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Resolve release identity
         id: rel
         run: |
-          # Asset version = the tag without a leading 'v'.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             tag="${{ inputs.tag }}"
           else
             tag="${GITHUB_REF_NAME}"
           fi
           ver="${tag#v}"
-          arch="${{ matrix.arch }}"
-          platform="${{ matrix.platform }}"
-          # Internal release.mk arch / os names.
-          case "$arch" in
+          case "${{ matrix.arch }}" in
             amd64) int_arch=x64 ;;
             arm64) int_arch=aarch64 ;;
           esac
-          if [ "$platform" = "musl" ]; then int_os="linux-musl"; else int_os="linux"; fi
           echo "version=$ver"      >> "$GITHUB_OUTPUT"
           echo "int_arch=$int_arch" >> "$GITHUB_OUTPUT"
-          echo "int_os=$int_os"     >> "$GITHUB_OUTPUT"
 
-      - name: Resolve supported PHP versions
-        id: php
+      - name: Install build dependencies
         run: |
-          json=$(make -f make/php_versions.mk php-versions-json ARCH=${{ matrix.arch }})
-          echo "$json"
-          # Space-separated list for the bash loop below.
-          echo "list=$(echo "$json" | jq -r '.[]' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.APT_DEPS_ASSEMBLE }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # 4.2.0
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
 
-      - name: Build agent for every PHP version (stages newrelic-<phpapi>.so)
-        env:
-          RELEASE_OS: ${{ steps.rel.outputs.int_os }}
-          RELEASE_ARCH: ${{ steps.rel.outputs.int_arch }}
+      - name: Build daemon (native target libc/arch)
+        run: make daemon
+
+      - name: Build installer (newrelic-install + newrelic-iutil)
+        run: make installer
+
+      - name: Collect staged agent extensions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: agent-so-${{ matrix.arch }}-*
+          path: agent-staging
+          merge-multiple: true
+
+      - name: Stage agent extensions into the release bundle
         run: |
           set -e
-          for php in ${{ steps.php.outputs.list }}; do
-            echo "::group::agent PHP $php (${{ matrix.platform }} ${{ matrix.arch }})"
-            docker run --rm \
-              -v "$PWD":"/usr/local/src/newrelic-php-agent" \
-              -e RELEASE_OS="$RELEASE_OS" -e RELEASE_ARCH="$RELEASE_ARCH" \
-              "${IMAGE_NAME}:make-php-${php}-${{ matrix.platform }}-${MAKE_PHP_VERSION}" \
-              make agent-for-release
-            echo "::endgroup::"
-          done
-
-      - name: Build libc-matched installer (newrelic-install + newrelic-iutil)
-        env:
-          RELEASE_OS: ${{ steps.rel.outputs.int_os }}
-          RELEASE_ARCH: ${{ steps.rel.outputs.int_arch }}
-        run: |
-          first="$(echo "${{ steps.php.outputs.list }}" | awk '{print $1}')"
-          docker run --rm \
-            -v "$PWD":"/usr/local/src/newrelic-php-agent" \
-            -e RELEASE_OS="$RELEASE_OS" -e RELEASE_ARCH="$RELEASE_ARCH" \
-            "${IMAGE_NAME}:make-php-${first}-${{ matrix.platform }}-${MAKE_PHP_VERSION}" \
-            make installer
-
-      - name: Build daemon (matching target libc/arch)
-        run: |
-          docker run --rm \
-            -v "$PWD":"/usr/local/src/newrelic-php-agent" \
-            "${IMAGE_NAME}:make-go-${{ matrix.platform }}-${MAKE_GO_VERSION}" \
-            make daemon
+          int_arch="${{ steps.rel.outputs.int_arch }}"
+          dst="releases/linux/agent/${int_arch}"
+          mkdir -p "$dst"
+          files=( $(find agent-staging -type f \( -name '*.so' -o -name '*.map' \) -print) )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "ERROR: no staged agent .so files found" >&2
+            exit 1
+          fi
+          cp -v "${files[@]}" "$dst/"
+          ls -l "$dst"
 
       - name: Assemble release tarball
         run: |
           make release-tarball \
-            RELEASE_OS=${{ steps.rel.outputs.int_os }} \
+            RELEASE_OS=linux \
             RELEASE_ARCH=${{ steps.rel.outputs.int_arch }} \
             RELEASE_VERSION=${{ steps.rel.outputs.version }}
 
       - name: Upload release asset
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          name: release-${{ matrix.arch }}
           path: |
             releases/*.tar.gz
             releases/*.sha256
@@ -165,7 +248,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: build
+    needs: assemble
     runs-on: ubuntu-latest
     steps:
       - name: Download all release assets
