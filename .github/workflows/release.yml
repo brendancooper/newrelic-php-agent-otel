@@ -1,0 +1,186 @@
+#
+# Build and publish otel-php-agent GitHub Releases.
+#
+# Produces, per (platform, arch), a self-contained release tarball matching the
+# contract documented in README.md and consumed by agent/install.sh:
+#
+#   otel-php-agent_<version>_<os>_<arch>[_musl].tar.gz
+#   otel-php-agent_<version>_<os>_<arch>[_musl].tar.gz.sha256
+#
+# Per platform/arch the workflow:
+#   1. builds the agent extension for every supported PHP version inside the
+#      matching `make-php` builder image (each run stages a
+#      newrelic-<PHP_API_VERSION>[-zts].so into releases/<os>/agent/<arch>/ via
+#      `make agent-for-release`),
+#   2. builds the libc-matched `newrelic-install` + `newrelic-iutil` (C helper)
+#      and the Go daemon inside the matching builder images,
+#   3. assembles the bundle with `make release-tarball` on the host (which
+#      only *stages* already-built artifacts — it never rebuilds the agent or
+#      daemon on the assemble runner, so a gnu/amd64 host never pollutes a
+#      musl/arm64 bundle),
+#   4. uploads the tarball + sha256 as a job artifact.
+#
+# A final `publish` job downloads every asset and creates the GitHub Release
+# (auto on tag push `v*`, or draft on manual dispatch).
+#
+# Required repo configuration (same as the existing build workflows):
+#   vars.MAKE_PHP_VERSION, vars.MAKE_GO_VERSION
+#   secrets.DOCKERHUB_USERNAME, secrets.DOCKERHUB_TOKEN
+#   contents: write (granted below) for release creation
+#
+name: release
+run-name: Release ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build from'
+        required: true
+        default: 'main'
+        type: string
+      tag:
+        description: 'Release tag to create (e.g. v1.0.0)'
+        required: true
+        type: string
+      draft:
+        description: 'Create as a draft release'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # platform ∈ {gnu, musl} maps to the builder image tag segment and to
+        # the release RELEASE_OS (linux / linux-musl).
+        platform: [gnu, musl]
+        arch: [amd64, arm64]
+    env:
+      IMAGE_NAME: newrelic/nr-php-agent-builder
+      MAKE_PHP_VERSION: ${{ vars.MAKE_PHP_VERSION }}
+      MAKE_GO_VERSION: ${{ vars.MAKE_GO_VERSION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # 6.0.3
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Compute release identity
+        id: rel
+        run: |
+          # Asset version = the tag without a leading 'v'.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          ver="${tag#v}"
+          arch="${{ matrix.arch }}"
+          platform="${{ matrix.platform }}"
+          # Internal release.mk arch / os names.
+          case "$arch" in
+            amd64) int_arch=x64 ;;
+            arm64) int_arch=aarch64 ;;
+          esac
+          if [ "$platform" = "musl" ]; then int_os="linux-musl"; else int_os="linux"; fi
+          echo "version=$ver"      >> "$GITHUB_OUTPUT"
+          echo "int_arch=$int_arch" >> "$GITHUB_OUTPUT"
+          echo "int_os=$int_os"     >> "$GITHUB_OUTPUT"
+
+      - name: Resolve supported PHP versions
+        id: php
+        run: |
+          json=$(make -f make/php_versions.mk php-versions-json ARCH=${{ matrix.arch }})
+          echo "$json"
+          # Space-separated list for the bash loop below.
+          echo "list=$(echo "$json" | jq -r '.[]' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # 4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build agent for every PHP version (stages newrelic-<phpapi>.so)
+        env:
+          RELEASE_OS: ${{ steps.rel.outputs.int_os }}
+          RELEASE_ARCH: ${{ steps.rel.outputs.int_arch }}
+        run: |
+          set -e
+          for php in ${{ steps.php.outputs.list }}; do
+            echo "::group::agent PHP $php (${{ matrix.platform }} ${{ matrix.arch }})"
+            docker run --rm \
+              -v "$PWD":"/usr/local/src/newrelic-php-agent" \
+              -e RELEASE_OS="$RELEASE_OS" -e RELEASE_ARCH="$RELEASE_ARCH" \
+              "${IMAGE_NAME}:make-php-${php}-${{ matrix.platform }}-${MAKE_PHP_VERSION}" \
+              make agent-for-release
+            echo "::endgroup::"
+          done
+
+      - name: Build libc-matched installer (newrelic-install + newrelic-iutil)
+        env:
+          RELEASE_OS: ${{ steps.rel.outputs.int_os }}
+          RELEASE_ARCH: ${{ steps.rel.outputs.int_arch }}
+        run: |
+          first="$(echo "${{ steps.php.outputs.list }}" | awk '{print $1}')"
+          docker run --rm \
+            -v "$PWD":"/usr/local/src/newrelic-php-agent" \
+            -e RELEASE_OS="$RELEASE_OS" -e RELEASE_ARCH="$RELEASE_ARCH" \
+            "${IMAGE_NAME}:make-php-${first}-${{ matrix.platform }}-${MAKE_PHP_VERSION}" \
+            make installer
+
+      - name: Build daemon (matching target libc/arch)
+        run: |
+          docker run --rm \
+            -v "$PWD":"/usr/local/src/newrelic-php-agent" \
+            "${IMAGE_NAME}:make-go-${{ matrix.platform }}-${MAKE_GO_VERSION}" \
+            make daemon
+
+      - name: Assemble release tarball
+        run: |
+          make release-tarball \
+            RELEASE_OS=${{ steps.rel.outputs.int_os }} \
+            RELEASE_ARCH=${{ steps.rel.outputs.int_arch }} \
+            RELEASE_VERSION=${{ steps.rel.outputs.version }}
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            releases/*.tar.gz
+            releases/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          generate_release_notes: true
+          files: |
+            assets/*.tar.gz
+            assets/*.sha256
