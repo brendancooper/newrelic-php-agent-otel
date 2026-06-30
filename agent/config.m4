@@ -107,6 +107,10 @@ if test "$PHP_NEWRELIC" = "yes"; then
   dnl Check for libpcre - an external dependency, which axiom needs. Use
   dnl install location provided via --with-pcre.
   PCRE_INCLINE=$PHP_PCRE/include
+  PCRE_LIBDIR=$PHP_PCRE
+  if test -d "$PHP_PCRE/lib"; then
+    PCRE_LIBDIR=$PHP_PCRE/lib
+  fi
   if echo "$PHP_PCRE" | grep -q /opt/nr/camp; then
     dnl Legacy agent's build system quirks:
     dnl libpcre provided by NRCAMP as libnrpcre is not position independent.
@@ -121,14 +125,14 @@ if test "$PHP_NEWRELIC" = "yes"; then
     dnl issue with runtime dependency on libpcre shared object that is hard to
     dnl satisfy universally because different Linux distributions use different
     dnl name of the shared object: libpcre.so or libpcre3.so.
-    PCRE_LIBLINE="-L$PHP_PCRE -l:libpcre.a"
+    PCRE_LIBLINE="-L$PCRE_LIBDIR -l:libpcre.a"
     PCRE_LIBRARY=pcre
   else
     dnl When casually building from source and not enforcing static linking,
     dnl through PCRE_STATIC=yes environmental variable, let the linker decide
     dnl what version of libpcre to link to. This is allowed because usually
     dnl when building from source, build platform = runtime platform.
-    PCRE_LIBLINE="-L$PHP_PCRE -lpcre"
+    PCRE_LIBLINE="-L$PCRE_LIBDIR -lpcre"
     PCRE_LIBRARY=pcre
   fi
 
