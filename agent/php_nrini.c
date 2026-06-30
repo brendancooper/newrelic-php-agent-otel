@@ -809,6 +809,39 @@ static PHP_INI_MH(nr_daemon_start_timeout_mh) {
   return SUCCESS;
 }
 
+/*
+ * OpenTelemetry / Splunk AlwaysOn Profiling INI modification handlers.
+ * Each stores the configured value verbatim into a per-process global; the
+ * MINIT exporter (agent/php_minit.c) re-exports them as OTEL_* environment
+ * variables when launching the daemon so the child inherits them. Empty
+ * values are stored as NULL so the setenv step skips them and any pre-existing
+ * OTEL_* env var from the parent environment remains authoritative.
+ */
+#define NR_OTEL_STRING_MH(name, field)                                       \
+  static PHP_INI_MH(name) {                                                  \
+    (void)entry;                                                              \
+    (void)mh_arg1;                                                            \
+    (void)mh_arg2;                                                            \
+    (void)mh_arg3;                                                            \
+    (void)stage;                                                              \
+    NR_UNUSED_TSRMLS;                                                         \
+    nr_free(NR_PHP_PROCESS_GLOBALS(field));                                  \
+    if (0 != NEW_VALUE_LEN) {                                                 \
+      NR_PHP_PROCESS_GLOBALS(field) = nr_strdup(NEW_VALUE);                 \
+    }                                                                         \
+    return SUCCESS;                                                          \
+  }
+
+NR_OTEL_STRING_MH(nr_otel_service_name_mh, otel_service_name)
+NR_OTEL_STRING_MH(nr_otel_service_version_mh, otel_service_version)
+NR_OTEL_STRING_MH(nr_otel_environment_mh, otel_environment)
+NR_OTEL_STRING_MH(nr_otel_endpoint_mh, otel_endpoint)
+NR_OTEL_STRING_MH(nr_otel_exporter_headers_mh, otel_exporter_headers)
+NR_OTEL_STRING_MH(nr_otel_profile_type_mh, otel_profile_type)
+NR_OTEL_STRING_MH(nr_otel_sample_period_mh, otel_sample_period)
+NR_OTEL_STRING_MH(nr_otel_no_phone_home_mh, otel_no_phone_home)
+NR_OTEL_STRING_MH(nr_otel_exporter_insecure_mh, otel_exporter_insecure)
+
 static PHP_INI_MH(nr_daemon_dont_launch_mh) {
   int val;
 
@@ -2212,6 +2245,59 @@ PHP_INI_ENTRY_EX("newrelic.daemon.start_timeout",
                  0)
 
 /*
+ * OpenTelemetry / Splunk AlwaysOn Profiling configuration. These are forwarded
+ * to the spawned daemon as OTEL_* environment variables (see php_minit.c), so
+ * the daemon's OTLP profiling egress picks them up. When unset, the daemon
+ * falls back to its own environment / defaults (env-var driven config is the
+ * primary config channel for the OTLP profiling conversion).
+ */
+PHP_INI_ENTRY_EX("newrelic.otel_service_name",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_service_name_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_service_version",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_service_version_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_environment",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_environment_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_endpoint",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_endpoint_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_exporter_headers",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_exporter_headers_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_profile_type",
+                 "cpu",
+                 NR_PHP_SYSTEM,
+                 nr_otel_profile_type_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_sample_period",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_sample_period_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_no_phone_home",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_no_phone_home_mh,
+                 0)
+PHP_INI_ENTRY_EX("newrelic.otel_exporter_insecure",
+                 "",
+                 NR_PHP_SYSTEM,
+                 nr_otel_exporter_insecure_mh,
+                 0)
+
+/*
  * Utilization
  */
 PHP_INI_ENTRY_EX("newrelic.daemon.utilization.detect_aws",
@@ -3008,6 +3094,24 @@ STD_PHP_INI_ENTRY_EX("newrelic.distributed_tracing.pad_trace_id",
                      NR_PHP_REQUEST,
                      nr_boolean_mh,
                      ini.distributed_tracing_pad_trace_id,
+                     zend_newrelic_globals,
+                     newrelic_globals,
+                     nr_enabled_disabled_dh)
+
+/*
+ * OpenTelemetry / Splunk AlwaysOn Profiling: generate a fresh W3C 128-bit (32
+ * lowercase hex) trace id at the root of each transaction instead of reusing
+ * the 16-hex transaction GUID. Enables non-PHP trace correlation / mixed-
+ * language APM and produces a spec-compliant trace id for the daemon's OTLP
+ * /v1/traces egress. Default off to preserve legacy behavior when
+ * distributed tracing alone is enough; turn on alongside OTEL_* profiling
+ * config when shipping to a Splunk / OTel backend.
+ */
+STD_PHP_INI_ENTRY_EX("newrelic.otel_w3c_trace_id",
+                     "",  // default false (empty string) per PHP INI parser
+                     NR_PHP_REQUEST,
+                     nr_boolean_mh,
+                     ini.otel_w3c_trace_id,
                      zend_newrelic_globals,
                      newrelic_globals,
                      nr_enabled_disabled_dh)

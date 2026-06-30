@@ -38,6 +38,19 @@
 
 #include "php_observer.h"
 
+/*
+ * Purpose : Export an OpenTelemetry INI value into the environment as the
+ *           named OTEL_* env var so the spawned daemon child inherits it.
+ *           A NULL or empty value is skipped, leaving an existing env var
+ *           (e.g. set by the service manager) authoritative.
+ */
+static void nr_php_otel_setenv(const char* envname, const char* value) {
+  if (NULL == value || '\0' == value[0]) {
+    return;
+  }
+  (void)setenv(envname, value, 1);
+}
+
 static void php_newrelic_init_globals(zend_newrelic_globals* nrg) {
   if (nrunlikely(NULL == nrg)) {
     return;
@@ -612,6 +625,33 @@ PHP_MINIT_FUNCTION(newrelic) {
       daemon_args.debug_http
           = NR_PHP_PROCESS_GLOBALS(daemon_special_curl_verbose);
       daemon_args.utilization = NR_PHP_PROCESS_GLOBALS(utilization);
+
+      /*
+       * Re-export the OpenTelemetry / Splunk AlwaysOn Profiling INI settings
+       * as OTEL_* environment variables so the spawned daemon child inherits
+       * them (the daemon's OTLP profiling egress reads these; see
+       * daemon cmd/daemon/worker.go otlpConfigFromEnv). Only non-empty INI
+       * values overwrite the parent environment; an unset INI key leaves any
+       * pre-existing OTEL_* env var (e.g. set by systemd) authoritative.
+       */
+      nr_php_otel_setenv("OTEL_SERVICE_NAME",
+                         NR_PHP_PROCESS_GLOBALS(otel_service_name));
+      nr_php_otel_setenv("OTEL_SERVICE_VERSION",
+                         NR_PHP_PROCESS_GLOBALS(otel_service_version));
+      nr_php_otel_setenv("OTEL_DEPLOYMENT_ENVIRONMENT",
+                         NR_PHP_PROCESS_GLOBALS(otel_environment));
+      nr_php_otel_setenv("OTEL_EXPORTER_OTLP_ENDPOINT",
+                         NR_PHP_PROCESS_GLOBALS(otel_endpoint));
+      nr_php_otel_setenv("OTEL_EXPORTER_OTLP_HEADERS",
+                         NR_PHP_PROCESS_GLOBALS(otel_exporter_headers));
+      nr_php_otel_setenv("OTEL_PHP_PROFILE_TYPE",
+                         NR_PHP_PROCESS_GLOBALS(otel_profile_type));
+      nr_php_otel_setenv("OTEL_PHP_SAMPLE_PERIOD",
+                         NR_PHP_PROCESS_GLOBALS(otel_sample_period));
+      nr_php_otel_setenv("OTEL_PHP_NO_PHONE_HOME",
+                         NR_PHP_PROCESS_GLOBALS(otel_no_phone_home));
+      nr_php_otel_setenv("OTEL_EXPORTER_OTLP_INSECURE",
+                         NR_PHP_PROCESS_GLOBALS(otel_exporter_insecure));
 
       daemon_pid
           = nr_spawn_daemon(NR_PHP_PROCESS_GLOBALS(daemon), &daemon_args);

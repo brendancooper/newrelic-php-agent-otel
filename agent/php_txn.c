@@ -934,6 +934,7 @@ nr_status_t nr_php_txn_begin(const char* appnames,
   opts.distributed_tracing_enabled = NRINI(distributed_tracing_enabled);
   opts.distributed_tracing_pad_trace_id
       = NRINI(distributed_tracing_pad_trace_id);
+  opts.otel_w3c_trace_id = NRINI(otel_w3c_trace_id);
   opts.distributed_tracing_exclude_newrelic_header
       = NRINI(distributed_tracing_exclude_newrelic_header);
   opts.span_events_enabled = NRINI(span_events_enabled);

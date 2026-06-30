@@ -628,18 +628,35 @@ nrtxn_t* nr_txn_begin(nrapp_t* app,
 
   nt->distributed_trace = nr_distributed_trace_create();
 
-  /*
-   * Per the spec: The trace id is constant for the entire trip. Its value is
-   * equal to the guid of the first span in the trip (this is the id of root
-   * span of the transaction, which equals the transaction id).
-   *
-   * The trace id will be overwritten by accepting an inbound DT
-   * payload.
-   */
   guid = nr_guid_create(app->rnd);
   nr_distributed_trace_set_txn_id(nt->distributed_trace, guid);
-  nr_distributed_trace_set_trace_id(nt->distributed_trace, guid,
-                                    opts->distributed_tracing_pad_trace_id);
+
+  /*
+   * Per the spec: The trace id is constant for the entire trip. Its value
+   * defaults to the guid of the first span (the transaction id); the trace
+   * id will be overwritten if an inbound DT payload is accepted.
+   *
+   * When otel_w3c_trace_id is enabled, generate a fresh W3C 128-bit (32-hex)
+   * trace id rather than reusing the 16-hex GUID. This produces a
+   * spec-compliant trace id for non-PHP trace correlation / mixed-language
+   * APM and for OTLP /v1/traces egress (the daemon's OTLP exporter expects
+   * a 32-hex trace id on each span event). Trace ids accepted from inbound
+   * W3C traceparent headers (which are already 32-hex) take precedence.
+   */
+  if (opts->otel_w3c_trace_id) {
+    /*
+     * At this point the just-created distributed_trace has no trace_id yet,
+     * so a fresh W3C 128-bit id is the root id. nr_distributed_trace_set_trace_id
+     * with do_padding=false stores it verbatim (it is already 32 hex chars).
+     */
+    char* root_trace_id = nr_trace_id_create(app->rnd);
+    nr_distributed_trace_set_trace_id(nt->distributed_trace, root_trace_id,
+                                      /*do_padding=*/false);
+    nr_free(root_trace_id);
+  } else {
+    nr_distributed_trace_set_trace_id(nt->distributed_trace, guid,
+                                      opts->distributed_tracing_pad_trace_id);
+  }
 
   nr_distributed_trace_set_trusted_key(
       nt->distributed_trace,

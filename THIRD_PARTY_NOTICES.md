@@ -1,11 +1,10 @@
 # Third Party Notices
 
+This agent was modified from the New Relic PHP agent. All relevant rights belong to New Relic and its 3rd parties.
+
 The New Relic PHP agent uses source code from third party libraries which carry
 their own copyright notices and license terms. These notices are provided
 below.
-
-In the event that a required notice is missing or incorrect, please notify us
-by e-mailing [open-source@newrelic.com](mailto:open-source@newrelic.com).
 
 ## Contents
 

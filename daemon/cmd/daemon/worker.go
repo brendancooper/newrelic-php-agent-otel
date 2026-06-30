@@ -44,6 +44,80 @@ func (e *workerError) Error() string {
 	return e.Component + ": " + e.Err.Error()
 }
 
+// otlpConfigFromEnv builds the OTLP profiling egress config from standard
+// OpenTelemetry environment variables. This is the minimal Configuration path
+// for the OTLP/PHP profiling conversion (full INI config lands in Phase 2).
+func otlpConfigFromEnv() newrelic.OTLPConfig {
+	cfg := newrelic.OTLPConfig{
+		Endpoint:           os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		ServiceName:        os.Getenv("OTEL_SERVICE_NAME"),
+		ServiceVersion:     os.Getenv("OTEL_SERVICE_VERSION"),
+		Environment:        os.Getenv("OTEL_EXPORTER_OTLP_ENVIRONMENT"),
+		ProfileType:        envOr("OTEL_PHP_PROFILE_TYPE", "cpu"),
+		NoPhoneHome:        os.Getenv("OTEL_PHP_NO_PHONE_HOME") != "",
+		Headers:            parseOtlpHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")),
+		InsecureSkipVerify: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") != "" && os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") != "false",
+		Compression:        envOr("OTEL_EXPORTER_OTLP_COMPRESSION", "gzip"),
+		EmitTraces:         os.Getenv("OTEL_PHP_TRACES_DISABLED") == "",
+		EmitMetrics:        os.Getenv("OTEL_PHP_METRICS_DISABLED") == "",
+	}
+	if cfg.Environment == "" {
+		cfg.Environment = os.Getenv("OTEL_DEPLOYMENT_ENVIRONMENT")
+	}
+	if p := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"); p != "" && p != "http/protobuf" && p != "http/json" {
+		log.Warnf("otlp: OTEL_EXPORTER_OTLP_PROTOCOL=%q is not supported (only http/protobuf); ignoring", p)
+	}
+	if dp := os.Getenv("OTEL_PHP_SAMPLE_PERIOD"); dp != "" {
+		if d, err := time.ParseDuration(dp); err == nil {
+			cfg.SamplePeriod = d
+		} else {
+			log.Warnf("otlp: ignoring invalid OTEL_PHP_SAMPLE_PERIOD=%q: %v", dp, err)
+		}
+	}
+	if cfg.Endpoint != "" {
+		// NoPhoneHome implies we never contact NR, so the endpoint is required
+		// for any profiling egress. Default NoPhoneHome on whenever an OTLP
+		// endpoint is set and the user hasn't explicitly chosen to phone home.
+		if os.Getenv("OTEL_PHP_PHONE_HOME") == "" {
+			cfg.NoPhoneHome = true
+		}
+	}
+	return cfg
+}
+
+// parseOtlpHeaders parses OTEL_EXPORTER_OTLP_HEADERS: a comma-separated list
+// of key=value pairs.
+func parseOtlpHeaders(s string) map[string]string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		idx := strings.IndexByte(pair, '=')
+		if idx < 0 {
+			log.Warnf("otlp: ignoring malformed header %q (expected key=value)", pair)
+			continue
+		}
+		out[strings.TrimSpace(pair[:idx])] = strings.TrimSpace(pair[idx+1:])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 // runWorker starts the listener and processor and does not return until a
 // signal is received indicating the worker should shut down, or a fatal
 // error occurs.
@@ -117,6 +191,7 @@ func runWorker(cfg *Config) {
 		IntegrationFormat: cfg.IntegrationFormat,
 		UtilConfig:        cfg.MakeUtilConfig(),
 		AppTimeout:        time.Duration(cfg.AppTimeout),
+		OTLP:              otlpConfigFromEnv(),
 	})
 	go processTxnData(errorChan, p)
 

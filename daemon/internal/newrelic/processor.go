@@ -16,6 +16,7 @@ import (
 	"github.com/newrelic/newrelic-php-agent/daemon/internal/newrelic/limits"
 	"github.com/newrelic/newrelic-php-agent/daemon/internal/newrelic/log"
 	"github.com/newrelic/newrelic-php-agent/daemon/internal/newrelic/utilization"
+	"github.com/newrelic/newrelic-php-agent/daemon/internal/otlp"
 )
 
 type TxnData struct {
@@ -94,6 +95,12 @@ type ProcessorConfig struct {
 	IntegrationFormat string
 	UtilConfig        utilization.Config
 	AppTimeout        time.Duration
+
+	// OTLP configures the local OTLP profiling egress. When Endpoint is
+	// non-empty, transaction traces are sent to the Splunk OTel collector as
+	// OTLP Logs (pprof). When NoPhoneHome is true, the NR connect/preconnect
+	// roundtrip is replaced by a local synthetic connect.
+	OTLP OTLPConfig
 }
 
 type Processor struct {
@@ -115,6 +122,7 @@ type Processor struct {
 	cfg                   ProcessorConfig
 	util                  *utilization.Data
 	integrationTxnSeq     uint64
+	otlpExporter          *otlp.Exporter
 }
 
 func (p *Processor) processTxnData(d TxnData) {
@@ -325,6 +333,11 @@ func (p *Processor) considerConnect(app *App) {
 	}
 
 	go func() {
+		p.ensureOtlpExporterForApp(args.AppKey.Appname)
+		if p.cfg.OTLP.NoPhoneHome {
+			p.connectAttemptChannel <- localConnect(args, p.otlpServiceName())
+			return
+		}
 		p.connectAttemptChannel <- ConnectApplication(args)
 	}()
 
@@ -533,6 +546,10 @@ type harvestArgs struct {
 	RequestHeadersMap   map[string]string
 	maxPayloadSize      int
 
+	// OTLP profiling egress; nil disables the profiling path.
+	profileExporter *otlp.Exporter
+	otlpConfig      OTLPConfig
+
 	// Used for final harvest before daemon exit
 	blocking bool
 }
@@ -666,6 +683,33 @@ func harvestAll(harvest *Harvest, args *harvestArgs, harvestLimits collector.Eve
 
 	harvest.addInstanceReportingMetric()
 
+	// OTLP egress path: when the OTLP exporter is wired, profiling always
+	// runs, plus optionally traces (NR SpanEvents -> OTLP /v1/traces) and
+	// metrics (NR MetricTable -> OTLP /v1/metrics). All other NR collector
+	// signals (custom/error events, errors, slow SQLs, txn events, log events,
+	// php packages) are dropped in v1; the no-phone-home path doesn't contact
+	// the NR collector.
+	if args.profileExporter != nil {
+		mc.wg.Add(1)
+		go func(t *TxnTraces) {
+			defer mc.wg.Done()
+			harvestProfiles(t, args.profileExporter, args.otlpConfig.profileType(), args.HarvestStart, args.otlpConfig)
+		}(harvest.TxnTraces)
+		if args.otlpConfig.EmitTraces {
+			mc.wg.Add(1)
+			go func(s *SpanEvents) {
+				defer mc.wg.Done()
+				harvestTraces(s, args.profileExporter, args.HarvestStart, args.otlpConfig)
+			}(harvest.SpanEvents)
+		}
+		if args.blocking {
+			harvestMetrics(harvest, args, mc, harvestLimits, to)
+		} else {
+			go harvestMetrics(harvest, args, mc, harvestLimits, to)
+		}
+		return
+	}
+
 	considerHarvestPayload(harvest.CustomEvents, args, mc)
 	considerHarvestPayload(harvest.ErrorEvents, args, mc)
 	considerHarvestPayload(harvest.Errors, args, mc)
@@ -728,10 +772,20 @@ func harvestByType(ah *AppHarvest, args *harvestArgs, ht HarvestType) {
 		harvest.addInstanceReportingMetric()
 		harvest.pidSet = make(map[int]struct{})
 
-		considerHarvestPayload(errors, args, mc)
-		considerHarvestPayload(slowSQLs, args, mc)
-		considerHarvestPayload(txnTraces, args, mc)
-		considerHarvestPayload(phpPackages, args, mc)
+		// v1 profiling-only egress: when OTLP profiling is wired, only TxnTraces
+		// are emitted (as pprof); errors, slow SQLs, and php packages are dropped.
+		if args.profileExporter == nil {
+			considerHarvestPayload(errors, args, mc)
+			considerHarvestPayload(slowSQLs, args, mc)
+			considerHarvestPayload(txnTraces, args, mc)
+			considerHarvestPayload(phpPackages, args, mc)
+		} else {
+			mc.wg.Add(1)
+			go func(t *TxnTraces) {
+				defer mc.wg.Done()
+				harvestProfiles(t, args.profileExporter, args.otlpConfig.profileType(), args.HarvestStart, args.otlpConfig)
+			}(txnTraces)
+		}
 
 		if args.blocking {
 			harvestMetrics(harvest, args, mc, ah.connectReply.EventHarvestConfig, ah.TraceObserver)
@@ -773,7 +827,15 @@ func harvestByType(ah *AppHarvest, args *harvestArgs, ht HarvestType) {
 
 		spanEvents := harvest.SpanEvents
 		harvest.SpanEvents = NewSpanEvents(eventConfigs.SpanEventConfig.Limit)
-		considerHarvestPayload(spanEvents, args, mc)
+		if args.profileExporter != nil && args.otlpConfig.EmitTraces {
+			mc.wg.Add(1)
+			go func(s *SpanEvents) {
+				defer mc.wg.Done()
+				harvestTraces(s, args.profileExporter, args.HarvestStart, args.otlpConfig)
+			}(spanEvents)
+		} else {
+			considerHarvestPayload(spanEvents, args, mc)
+		}
 	}
 
 	if ht&HarvestLogEvents == HarvestLogEvents && eventConfigs.LogEventConfig.Limit != 0 {
@@ -811,7 +873,15 @@ func harvestMetrics(h *Harvest, args *harvestArgs, mc *MetricsController, harves
 
 	h.Metrics = NewMetricTable(limits.MaxMetrics, time.Now())
 
-	considerHarvestPayload(metrics, args, mc)
+	if args.profileExporter != nil && args.otlpConfig.EmitMetrics {
+		mc.wg.Add(1)
+		go func(m *MetricTable) {
+			defer mc.wg.Done()
+			harvestMetricsOTLP(m, args.profileExporter, args.HarvestStart, args.otlpConfig)
+		}(metrics)
+	} else {
+		considerHarvestPayload(metrics, args, mc)
+	}
 }
 
 func harvestDataUsage(h *Harvest, args *harvestArgs, mc *MetricsController) {
@@ -899,6 +969,8 @@ func (p *Processor) doHarvest(ph ProcessorHarvest) {
 		client:              p.cfg.Client,
 		RequestHeadersMap:   app.connectReply.RequestHeadersMap,
 		maxPayloadSize:      app.connectReply.MaxPayloadSizeInBytes,
+		profileExporter:     p.otlpExporter,
+		otlpConfig:          p.cfg.OTLP,
 		// Splitting large payloads is limited to applications that have
 		// distributed tracing on. That restriction is a saftey measure
 		// to not overload the backend by sending two payloads instead
@@ -941,7 +1013,7 @@ func (p *Processor) processHarvestError(d HarvestError) {
 }
 
 func NewProcessor(cfg ProcessorConfig) *Processor {
-	return &Processor{
+	p := &Processor{
 		apps:                  make(map[AppKey]*App),
 		harvests:              make(map[AgentRunID]*AppHarvest),
 		txnDataChannel:        make(chan TxnData, limits.TxnDataChanBuffering),
@@ -954,6 +1026,76 @@ func NewProcessor(cfg ProcessorConfig) *Processor {
 		appConnectBackoff:     limits.AppConnectAttemptBackoff,
 		cfg:                   cfg,
 	}
+
+	if cfg.OTLP.Endpoint != "" {
+		svc := cfg.OTLP.ServiceName
+		if svc == "" {
+			svc = "php" // resolved per-app at first connect if still default
+		}
+		p.buildOtlpExporter(svc)
+	} else if cfg.OTLP.NoPhoneHome {
+		log.Warnf("otlp: NoPhoneHome set but no OTLP endpoint configured; apps will locally connect with no profiling egress")
+	}
+
+	return p
+}
+
+// otlpServiceName returns the configured service name (first app name falls
+// back to the OTLP default), used as the profiling source.event.name default
+// when no per-app name is available.
+func (p *Processor) otlpServiceName() string {
+	if p.cfg.OTLP.ServiceName != "" {
+		return p.cfg.OTLP.ServiceName
+	}
+	return "php"
+}
+
+// buildOtlpExporter constructs the OTLP profiling exporter with the given
+// service name and stores it on the processor. On error it logs and leaves the
+// exporter nil (profiling egress disabled, fall through to legacy NR path).
+func (p *Processor) buildOtlpExporter(svc string) {
+	exp, err := otlp.New(otlp.Config{
+		Endpoint:           p.cfg.OTLP.Endpoint,
+		ServiceName:        svc,
+		ServiceVersion:     p.cfg.OTLP.ServiceVersion,
+		Environment:        p.cfg.OTLP.Environment,
+		SamplePeriod:       p.cfg.OTLP.SamplePeriod,
+		Headers:            p.cfg.OTLP.Headers,
+		InsecureSkipVerify: p.cfg.OTLP.InsecureSkipVerify,
+		Compression:        p.cfg.OTLP.Compression,
+	})
+	if err != nil {
+		log.Warnf("otlp: disabled (exporter config error): %v", err)
+		return
+	}
+	p.otlpExporter = exp
+	log.Infof("otlp: profiling egress enabled -> %s/v1/logs (service=%q env=%q type=%s no-phone-home=%v)",
+		p.cfg.OTLP.Endpoint, svc, p.cfg.OTLP.Environment, p.cfg.OTLP.profileType(), p.cfg.OTLP.NoPhoneHome)
+}
+
+// ensureOtlpExporterForApp lazily builds the exporter using the first app
+// name as service.name when no OTEL_SERVICE_NAME was configured. The first
+// segment of a semicolon-separated app name is taken (per the locked
+// decision: first app name only).
+func (p *Processor) ensureOtlpExporterForApp(appname string) {
+	if p.otlpExporter != nil {
+		return
+	}
+	if p.cfg.OTLP.Endpoint == "" {
+		return
+	}
+	if p.cfg.OTLP.ServiceName != "" {
+		p.buildOtlpExporter(p.cfg.OTLP.ServiceName)
+		return
+	}
+	name := appname
+	if i := strings.IndexByte(name, ';'); i >= 0 {
+		name = name[:i]
+	}
+	if name == "" {
+		name = "php"
+	}
+	p.buildOtlpExporter(name)
 }
 
 func (p *Processor) Run() error {

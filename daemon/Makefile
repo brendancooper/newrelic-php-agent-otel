@@ -75,3 +75,11 @@ integration:
 test:
 	$(GO) test $(GOFLAGS) ./...
 
+# smoke runs the end-to-end OTLP/PHP profiling smoke harness: an in-process
+# mock OTLP/HTTP collector validates the segment-tree -> pprof -> OTLP Logs
+# round-trip and the Splunk AlwaysOn Profiling LogRecord contract. No
+# external collector or Splunk tenant required.
+.PHONY: smoke
+smoke:
+	$(GO) run $(GOFLAGS) $(GO_MODULE)/cmd/smoke
+

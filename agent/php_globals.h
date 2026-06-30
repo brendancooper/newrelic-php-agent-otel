@@ -32,6 +32,24 @@ typedef struct _nrphpglobals_t {
   nrtime_t
       daemon_app_connect_timeout; /* Daemon application connection timeout */
   char* daemon_start_timeout;     /* Daemon startup timeout */
+
+  /*
+   * OpenTelemetry / Splunk AlwaysOn Profiling configuration. These mirror
+   * the OTEL_* environment variables consumed by the daemon's OTLP profiling
+   * egress (see daemon cmd/daemon/worker.go otlpConfigFromEnv). When the agent
+   * spawns the daemon, it exports these as the corresponding OTEL_* env vars so
+   * the spawned child inherits them (see agent/php_minit.c). When the daemon
+   * runs as a system service, set the OTEL_* env vars there instead.
+   */
+  char* otel_service_name;        /* newrelic.otel_service_name      -> OTEL_SERVICE_NAME */
+  char* otel_service_version;     /* newrelic.otel_service_version   -> OTEL_SERVICE_VERSION */
+  char* otel_environment;         /* newrelic.otel_environment        -> OTEL_DEPLOYMENT_ENVIRONMENT */
+  char* otel_endpoint;            /* newrelic.otel_endpoint          -> OTEL_EXPORTER_OTLP_ENDPOINT */
+  char* otel_exporter_headers;    /* newrelic.otel_exporter_headers  -> OTEL_EXPORTER_OTLP_HEADERS */
+  char* otel_profile_type;        /* newrelic.otel_profile_type      -> OTEL_PHP_PROFILE_TYPE */
+  char* otel_sample_period;       /* newrelic.otel_sample_period     -> OTEL_PHP_SAMPLE_PERIOD */
+  char* otel_no_phone_home;      /* newrelic.otel_no_phone_home     -> OTEL_PHP_NO_PHONE_HOME */
+  char* otel_exporter_insecure;   /* newrelic.otel_exporter_insecure -> OTEL_EXPORTER_OTLP_INSECURE */
   char* udspath;      /* Legacy path for daemon, set by newrelic.daemon.port */
   char* address_path; /* Path for daemon, set by newrelic.daemon.address */
   nr_conn_params_t* daemon_conn_params; /* Daemon connection information */

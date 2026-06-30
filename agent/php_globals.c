@@ -32,6 +32,15 @@ static void nr_php_per_process_globals_dispose(void) {
   nr_free(nr_php_per_process_globals.daemon_auditlog);
   nr_free(nr_php_per_process_globals.daemon_app_timeout);
   nr_free(nr_php_per_process_globals.daemon_start_timeout);
+  nr_free(nr_php_per_process_globals.otel_service_name);
+  nr_free(nr_php_per_process_globals.otel_service_version);
+  nr_free(nr_php_per_process_globals.otel_environment);
+  nr_free(nr_php_per_process_globals.otel_endpoint);
+  nr_free(nr_php_per_process_globals.otel_exporter_headers);
+  nr_free(nr_php_per_process_globals.otel_profile_type);
+ nr_free(nr_php_per_process_globals.otel_sample_period);
+  nr_free(nr_php_per_process_globals.otel_no_phone_home);
+  nr_free(nr_php_per_process_globals.otel_exporter_insecure);
   nr_free(nr_php_per_process_globals.udspath);
   nr_free(nr_php_per_process_globals.address_path);
   nr_conn_params_free(nr_php_per_process_globals.daemon_conn_params);

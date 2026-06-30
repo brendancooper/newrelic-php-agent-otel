@@ -347,6 +347,10 @@ typedef struct _ini_t {
       distributed_tracing_exclude_newrelic_header;  // newrelic.distributed_tracing_exclude_newrelic_header
   nrinibool_t
       distributed_tracing_pad_trace_id;  // newrelic.distributed_tracing.pad_trace_id
+  nrinibool_t
+      otel_w3c_trace_id;  // newrelic.otel_w3c_trace_id: generate a fresh W3C
+                          // 128-bit (32-hex) trace id at the root
+                          // transaction (for OTLP /v1/traces egress)
   nrinibool_t span_events_enabled;       // newrelic.span_events_enabled
   nriniuint_t
       span_events_max_samples_stored;  // newrelic.span_events.max_samples_stored

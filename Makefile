@@ -194,6 +194,11 @@ daemon_race:
 daemon_test:
 	$(MAKE) -C daemon test
 
+# End-to-end OTLP/PHP profiling smoke harness (no external collector required).
+.PHONY: daemon_smoke
+daemon_smoke:
+	$(MAKE) -C daemon smoke
+
 .PHONY: daemon_bench
 daemon_bench:
 	$(MAKE) -C daemon bench

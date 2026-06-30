@@ -94,6 +94,11 @@ typedef struct _nrtxnopt_t {
   bool distributed_tracing_pad_trace_id; /* whether to pad internally generated
                                             trace_id to NR_TRACE_ID_MAX_SIZE
                                             characters */
+  bool otel_w3c_trace_id; /* generate a full W3C 128-bit (32-hex) trace id
+                             at the root transaction instead of reusing the
+                             16-hex transaction GUID; enables non-PHP trace
+                             correlation / mixed-language APM and W3C-compliant
+                             OTLP /v1/traces egress */
   bool distributed_tracing_exclude_newrelic_header; /* Whether distributed
                                                        tracing outbound headers
                                                        should omit newrelic
