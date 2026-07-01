@@ -21,9 +21,13 @@ func mustReadFile(t *testing.T, p string) []byte {
 }
 
 // realTraceData is a TxnTrace.Data JSON string in the exact envelope shape
-// produced by axiom/nr_segment_traces.c (header + attr-name table + string
-// table with backtick-indexed names). It mirrors the multi-node fixture in
-// axiom/tests/test_segment_traces.c with nested + sibling segments.
+// produced by axiom/nr_segment_traces.c: a TWO-element top-level array whose
+// first element is the header [version, agentAttrs, userAttrs, rootNode,
+// attrHash] (the attribute hash is folded into the header array as its 5th
+// element, NOT a separate envelope element) and whose second element is the
+// string table that backtick-indexed names reference. It mirrors the
+// multi-node fixture in axiom/tests/test_segment_traces.c with nested +
+// sibling segments.
 const realTraceData = `[
   [0, {}, {}, [0, 2000, "` + "`" + `0", {}, [
     [0, 9, "` + "`" + `1", {}, [
@@ -34,9 +38,20 @@ const realTraceData = `[
       [12, 30, "` + "`" + `5", {}, []],
       [40, 55, "PDO->query", {}, []]
     ]]
-  ]]],
-  {"agentAttributes": ["agent_attributes"], "userAttributes": ["user_attributes"], "intrinsics": ["intrinsics"]},
+  ]], {"agentAttributes": ["agent_attributes"], "userAttributes": ["user_attributes"], "intrinsics": ["intrinsics"]}],
   ["WebTransaction/Function/index", "doWork", "dbQuery", "httpCall", "outerWrap", "innerSleep", "WebTransaction/*"]
+]`
+
+// legacyThreeElementTraceData carries the attribute hash as a SEPARATE
+// top-level envelope element (string table at index 2). The real agent does
+// not emit this layout, but the decoder tolerates it; this guards against
+// regressing that tolerance.
+const legacyThreeElementTraceData = `[
+  [0, {}, {}, [0, 2000, "` + "`" + `0", {}, [
+    [0, 9, "` + "`" + `1", {}, []]
+  ]]],
+  {"intrinsics": {"cpu_time": 0.002}},
+  ["WebTransaction/Function/index", "doWork"]
 ]`
 
 func TestDecodeTrace(t *testing.T) {
@@ -66,6 +81,45 @@ func TestDecodeTrace(t *testing.T) {
 	// Literal (non-backtick) name resolves as-is.
 	if got, want := tr.Root.Children[1].Children[1].Name, "PDO->query"; got != want {
 		t.Errorf("literal name = %q want %q", got, want)
+	}
+	if tr.HasUnresolvedNames() {
+		t.Errorf("realTraceData should have no unresolved backtick names")
+	}
+}
+
+func TestDecodeTrace_LegacyThreeElementEnvelope(t *testing.T) {
+	// The decoder must tolerate a 3-element envelope (attr-hash separate, string
+	// table at index 2) even though the real agent emits a 2-element envelope.
+	tr, err := DecodeTrace([]byte(legacyThreeElementTraceData), "WebTransaction/Function/index", 1_700_000_000_000)
+	if err != nil {
+		t.Fatalf("DecodeTrace: %v", err)
+	}
+	if got, want := tr.Root.Name, "WebTransaction/Function/index"; got != want {
+		t.Errorf("root name = %q want %q", got, want)
+	}
+	if got, want := tr.Root.Children[0].Name, "doWork"; got != want {
+		t.Errorf("child name = %q want %q", got, want)
+	}
+	if tr.HasUnresolvedNames() {
+		t.Errorf("legacy envelope should have no unresolved backtick names")
+	}
+}
+
+func TestDecodeTrace_NoStringTableFlagUnresolved(t *testing.T) {
+	// A trace envelope whose string table cannot be located must still decode
+	// (names keep the raw backtick token) and must report unresolved names so
+	// the caller can warn.
+	bt := "`"
+	noTable := `[[0, {}, {}, [0, 2000, "` + bt + `0", {}, [[1, 2, "` + bt + `1", {}, []]]]]]`
+	tr, err := DecodeTrace([]byte(noTable), "WebTransaction/Function/index", 1_700_000_000_000)
+	if err != nil {
+		t.Fatalf("DecodeTrace: %v", err)
+	}
+	if !tr.HasUnresolvedNames() {
+		t.Errorf("expected unresolved backtick names when string table is absent")
+	}
+	if got, want := tr.Root.Name, bt+"0"; got != want {
+		t.Errorf("root name = %q want raw token %q", got, want)
 	}
 }
 

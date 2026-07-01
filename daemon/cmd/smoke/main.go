@@ -49,6 +49,12 @@ import (
 	"github.com/newrelic/newrelic-php-agent/daemon/internal/pprof"
 )
 
+// sampleTraceData mirrors the EXACT envelope shape produced by
+// axiom/nr_segment_traces.c: a two-element top-level array whose first
+// element is the header [version, agentAttrs, userAttrs, rootNode, attrHash]
+// (the attribute hash is the 5th element of the header array, not a separate
+// envelope element) and whose second element is the backtick-indexed string
+// table. See daemon/internal/pprof/segment_tree.go.
 const sampleTraceData = `[
   [0, {}, {}, [0, 2000, "` + "`" + `0", {}, [
     [0, 9, "` + "`" + `1", {}, [
@@ -59,8 +65,7 @@ const sampleTraceData = `[
       [12, 30, "` + "`" + `5", {}, []],
       [40, 55, "PDO->query", {}, []]
     ]]
-  ]]],
-  {"agentAttributes": ["agent_attributes"], "userAttributes": ["user_attributes"], "intrinsics": ["intrinsics"]},
+  ]], {"agentAttributes": ["agent_attributes"], "userAttributes": ["user_attributes"], "intrinsics": ["intrinsics"]}],
   ["WebTransaction/Function/index", "doWork", "dbQuery", "httpCall", "outerWrap", "innerSleep", "WebTransaction/*"]
 ]`
 

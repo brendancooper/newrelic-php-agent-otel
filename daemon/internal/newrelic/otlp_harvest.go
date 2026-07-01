@@ -183,6 +183,9 @@ func collectProfileRecords(traces *TxnTraces, profileType pprof.ProfileType, cfg
 				log.Warnf("otlp: skipping unparseable trace %q: %v", tt.MetricName, err)
 				continue
 			}
+			if tr.HasUnresolvedNames() {
+				log.Warnf("otlp: trace %q has unresolved backtick segment names (its TxnTrace.Data envelope has no usable string table); pprof functions will be named by raw index", tt.MetricName)
+			}
 			prof := pprof.BuildProfile(tr, profileType, period)
 			records = append(records, otlp.ProfileRecord{
 				Profile:     prof,
