@@ -6,10 +6,17 @@
 // axiom/tests/test_segment_traces.c):
 //
 //	[
-//	  [0, {}, {}, <rootNode>],                  // [version, agentAttrs, userAttrs, root]
-//	  {"agentAttributes":[...], "userAttributes":[...], "intrinsics":[...]}, // attr-name table
+//	  [0, {}, {}, <rootNode>, <attrHash>],      // header: [version, agentAttrs, userAttrs, root, attrs]
 //	  ["WebTransaction/*", "A", "B", ...]        // string table; backtick indices `\`N` ref this
 //	]
+//
+// The attr-hash is emitted as the 5th element of the header array (not as a
+// separate envelope element), so the real envelope has exactly two top-level
+// elements and the string table sits at index 1. Older/hand-built traces may
+// instead carry the attr-hash as a separate envelope element, giving a
+// three-element envelope with the string table at index 2. The string table is
+// therefore located by scanning the envelope for the element that parses as a
+// JSON array of strings, which tolerates either layout.
 //
 // Each node is [startMillis, stopMillis, name, params, children], where name is
 // either a literal string or a backtick-prefixed index ("`0") into the string
@@ -53,17 +60,28 @@ func DecodeTrace(data []byte, traceName string, traceStartUnixMillis float64) (*
 		return nil, fmt.Errorf("pprof: trace envelope has %d elements, need >=1", len(envelope))
 	}
 
-	// string table (index 2 of the envelope), may be absent for older traces.
+	// Locate the string table by scanning the envelope for the element that
+	// parses as a JSON array of strings. The real agent emits a two-element
+	// envelope whose string table is at index 1 (the attr-hash is folded into
+	// the header array as its 5th element); some traces instead carry the
+	// attr-hash as a separate envelope element, putting the string table at
+	// index 2. Scanning tolerates both layouts and is robust to future
+	// reordering. Not finding a string table is not fatal here: resolve() will
+	// keep the raw backtick token, and findUnresolvedNames() below lets the
+	// caller surface the problem.
 	var stringTable []string
-	if len(envelope) >= 3 {
-		if err := json.Unmarshal(envelope[2], &stringTable); err != nil {
-			// Not fatal; resolve backticks will just keep the raw token.
-			stringTable = nil
+	for _, el := range envelope {
+		var cand []string
+		if err := json.Unmarshal(el, &cand); err == nil && cand != nil {
+			stringTable = cand
+			break
 		}
 	}
 
-	// first element: [version, agentAttrs, userAttrs, rootNode]. Parse as a
-	// rawMessage array and extract index 3 (the root node).
+	// first element: the header [version, agentAttrs, userAttrs, rootNode],
+	// optionally followed by a 5th element (the attribute hash) in the real
+	// agent layout. Parse as a rawMessage array and extract index 3 (the root
+	// node); any 5th element is ignored here.
 	var header []json.RawMessage
 	if err := json.Unmarshal(envelope[0], &header); err != nil {
 		return nil, fmt.Errorf("pprof: parse trace header: %w", err)
@@ -95,6 +113,31 @@ func DecodeTrace(data []byte, traceName string, traceStartUnixMillis float64) (*
 		StartTime: start,
 		Root:      root,
 	}, nil
+}
+
+// HasUnresolvedNames reports whether any segment still carries a raw
+// backtick-index name (e.g. "`0"), which means the string table could not
+// resolve it. This typically indicates the trace envelope carried no usable
+// string table. Callers can use this to surface a diagnostic warning after
+// DecodeTrace instead of silently emitting a pprof profile whose Function
+// names are useless backtick tokens.
+func (t *Trace) HasUnresolvedNames() bool {
+	var walk func(*Segment) bool
+	walk = func(s *Segment) bool {
+		if s == nil {
+			return false
+		}
+		if strings.HasPrefix(s.Name, "`") {
+			return true
+		}
+		for _, c := range s.Children {
+			if walk(c) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(t.Root)
 }
 
 // resolveName maps a backtick-indexed segment name to its resolved string; on
