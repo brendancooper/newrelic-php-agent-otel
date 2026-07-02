@@ -14,8 +14,13 @@ package otlp
 // filter) functions:
 //
 //   - `WebTransaction/<path>`      → Histogram `http.server.request.duration`
-//                                    (seconds), dimensioned by
-//                                    `php.transaction.name` and `service.name`.
+//                                    (seconds), dimensioned by `service.name`
+//                                    only (no per-transaction-name dimension:
+//                                    that would create one time series per
+//                                    unique route/action, an unbounded
+//                                    cardinality source; per-endpoint
+//                                    breakdown is already available from the
+//                                    span-derived APM metrics).
 //   - `External/<host>/<library>`  → Histogram `http.client.request.duration`
 //                                    with `net.peer.name` set when derivable.
 //   - `Datastore/operation/<system>/<op>`
@@ -52,7 +57,10 @@ package otlp
 // interval data NR's six-field aggregate cannot reproduce exact percentiles,
 // but Splunk's chart builder (which interpolates percentile X from the
 // histogram bucket boundaries and counts) will produce plausible values
-// bounded between min and max.
+// bounded between min and max. Note min/max/exclusive/sum_of_squares are used
+// only to synthesize the bucket distribution; they are NOT emitted as
+// data-point attributes (they vary continuously per harvest, which would
+// make every data point its own unique time series).
 
 import (
 	"context"
@@ -161,18 +169,10 @@ func (e *Exporter) emitMetricRecord(dest pmetric.MetricSlice, r MetricRecord, de
 	}
 	switch {
 	case strings.HasPrefix(r.Name, "WebTransaction/"):
-		emitLatencyHistogram(dest, "http.server.request.duration", r, ts,
-			func(attrs pcommon.Map) {
-				attrs.PutStr("php.transaction.name", r.Name)
-				if r.Scope != "" {
-					// The (txn-name) scope is the transaction the latency was
-					// measured in; for a root web txn this equals the record
-					// name, so we only set `php.transaction.scope` when the
-					// metric is a child (e.g. a child Datastore metric scoped
-					// to the parent web txn).
-					attrs.PutStr("php.transaction.scope", r.Scope)
-				}
-			})
+		// No php.transaction.name/scope dimension: it's unbounded cardinality
+		// (one series per unique route/action) and per-endpoint breakdown is
+		// already available from the span-derived APM metrics.
+		emitLatencyHistogram(dest, "http.server.request.duration", r, ts, nil)
 		return true
 	case strings.HasPrefix(r.Name, "OtherTransaction/"):
 		// Background/CLI entry points. Emit as `http.server.request.duration`
@@ -181,11 +181,7 @@ func (e *Exporter) emitMetricRecord(dest pmetric.MetricSlice, r MetricRecord, de
 		// the same `service.request` family regardless of kind.
 		emitLatencyHistogram(dest, "http.server.request.duration", r, ts,
 			func(attrs pcommon.Map) {
-				attrs.PutStr("php.transaction.name", r.Name)
 				attrs.PutStr("rpc.system", "php-cli")
-				if r.Scope != "" {
-					attrs.PutStr("php.transaction.scope", r.Scope)
-				}
 			})
 		return true
 	case strings.HasPrefix(r.Name, "External/"):
@@ -200,9 +196,6 @@ func (e *Exporter) emitMetricRecord(dest pmetric.MetricSlice, r MetricRecord, de
 				if len(parts) > 1 && parts[1] != "" && parts[1] != "all" {
 					attrs.PutStr("http.flavor", parts[1])
 				}
-				if r.Scope != "" {
-					attrs.PutStr("php.transaction.scope", r.Scope)
-				}
 			})
 		return true
 	case strings.HasPrefix(r.Name, "Datastore/operation/"):
@@ -215,9 +208,6 @@ func (e *Exporter) emitMetricRecord(dest pmetric.MetricSlice, r MetricRecord, de
 				}
 				if len(parts) > 1 && parts[1] != "" {
 					attrs.PutStr("db.operation", parts[1])
-				}
-				if r.Scope != "" {
-					attrs.PutStr("php.transaction.scope", r.Scope)
 				}
 			})
 		return true
@@ -235,9 +225,6 @@ func (e *Exporter) emitMetricRecord(dest pmetric.MetricSlice, r MetricRecord, de
 				if len(parts) > 2 && parts[2] != "" {
 					attrs.PutStr("db.operation", parts[2])
 				}
-				if r.Scope != "" {
-					attrs.PutStr("php.transaction.scope", r.Scope)
-				}
 			})
 		return true
 	case strings.HasPrefix(r.Name, "Datastore/instance/"):
@@ -251,9 +238,6 @@ func (e *Exporter) emitMetricRecord(dest pmetric.MetricSlice, r MetricRecord, de
 				}
 				if len(parts) > 1 && parts[1] != "" {
 					attrs.PutStr("db.instance", parts[1])
-				}
-				if r.Scope != "" {
-					attrs.PutStr("php.transaction.scope", r.Scope)
 				}
 			})
 		return true
@@ -304,9 +288,11 @@ func prefixMetric(name string) string {
 
 // emitLatencyHistogram emits an OTLP Histogram with both `count`/`sum` and a
 // bucket distribution synthesized from (count, min, max) using the OTel
-// default HTTP latency boundaries. min/max/exclusive/sum_of_squares are
-// preserved as data-point attributes so downstream tools still see the
-// original NR aggregates.
+// default HTTP latency boundaries. min/max/exclusive/sum_of_squares are used
+// only to shape the synthesized buckets; they are deliberately NOT emitted as
+// data-point attributes since they vary continuously every harvest and would
+// otherwise make each data point its own unique (unbounded-cardinality) time
+// series.
 func emitLatencyHistogram(dest pmetric.MetricSlice, name string, r MetricRecord, ts time.Time, setAttrs func(pcommon.Map)) {
 	m := dest.AppendEmpty()
 	m.SetName(name)
@@ -314,18 +300,6 @@ func emitLatencyHistogram(dest pmetric.MetricSlice, name string, r MetricRecord,
 	hdp.SetTimestamp(pcommon.NewTimestampFromTime(ts))
 	hdp.SetCount(uint64(r.Count))
 	hdp.SetSum(r.Total)
-	if r.Min > 0 {
-		hdp.Attributes().PutDouble("min", r.Min)
-	}
-	if r.Max > 0 {
-		hdp.Attributes().PutDouble("max", r.Max)
-	}
-	if r.Exclusive > 0 {
-		hdp.Attributes().PutDouble("newrelic.exclusive", r.Exclusive)
-	}
-	if r.SumSquares > 0 {
-		hdp.Attributes().PutDouble("newrelic.sum_of_squares", r.SumSquares)
-	}
 	synthesizeBuckets(hdp, r.Count, r.Min, r.Max)
 	if setAttrs != nil {
 		setAttrs(hdp.Attributes())
@@ -403,8 +377,12 @@ func synthesizeBuckets(hdp pmetric.HistogramDataPoint, count, lo, hi float64) {
 	hdp.BucketCounts().FromRaw(raw)
 }
 
-// emitGaugeBool emits a Gauge with DoubleValue = r.Count and preserves the
-// NR aggregate fields as data-point attributes.
+// emitGaugeBool emits a Gauge with DoubleValue = r.Count. NR's min/max/
+// exclusive/sum_of_squares aggregate fields are deliberately NOT emitted as
+// data-point attributes (they vary continuously every harvest, which would
+// make each data point its own unique unbounded-cardinality time series);
+// `newrelic.total` is kept since it's the one aggregate still useful as a
+// coarse dimension-free companion value.
 func emitGaugeBool(dest pmetric.MetricSlice, name string, r MetricRecord, ts time.Time, setAttrs func(pcommon.Map)) {
 	gp := dest.AppendEmpty()
 	gp.SetName(name)
@@ -412,23 +390,8 @@ func emitGaugeBool(dest pmetric.MetricSlice, name string, r MetricRecord, ts tim
 	dp := gp.Gauge().DataPoints().AppendEmpty()
 	dp.SetTimestamp(pcommon.NewTimestampFromTime(ts))
 	dp.SetDoubleValue(r.Count)
-	if r.Scope != "" {
-		dp.Attributes().PutStr("php.transaction.scope", r.Scope)
-	}
 	if r.Total != 0 {
 		dp.Attributes().PutDouble("newrelic.total", r.Total)
-	}
-	if r.Exclusive != 0 {
-		dp.Attributes().PutDouble("newrelic.exclusive", r.Exclusive)
-	}
-	if r.Min != 0 {
-		dp.Attributes().PutDouble("newrelic.min", r.Min)
-	}
-	if r.Max != 0 {
-		dp.Attributes().PutDouble("newrelic.max", r.Max)
-	}
-	if r.SumSquares != 0 {
-		dp.Attributes().PutDouble("newrelic.sum_of_squares", r.SumSquares)
 	}
 	if setAttrs != nil {
 		setAttrs(dp.Attributes())

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -304,6 +305,101 @@ func fillSpan(span ptrace.Span, p *spanEventPayload, now time.Time) {
 	// agent.* except the error.* we already added.
 	agentReserved := map[string]struct{}{"error.message": {}, "error.class": {}}
 	mergeAttrs(span.Attributes(), p.Agent, agentReserved, "")
+
+	// Datastore calls: add the OTel semantic-convention attributes Splunk
+	// Observability Cloud's APM backend-inference logic needs to render the
+	// call as an inferred "<db.system>:<db.name>" database node rather than
+	// a same-service internal span. Without these the span only carries
+	// NR's own legacy attribute names (`component`, `db.instance`,
+	// `peer.hostname`/`peer.address`), which Splunk's OTLP ingest doesn't
+	// recognize.
+	if str("category") == "datastore" {
+		addDatastoreSemanticAttrs(span.Attributes(), p)
+	}
+}
+
+// datastoreDBSystem maps the New Relic datastore "component" product name
+// (lowercased; see axiom/nr_datastore_private.h) onto the canonical OTel
+// `db.system` semantic-convention value. The C agent only ever populates the
+// `db.system` agent attribute directly for the AWS DynamoDB integration
+// (agent/lib_aws_sdk_php.c); every other datastore driver carries only the
+// human-readable product name in the `component` intrinsic, and that name
+// doesn't always match the OTel value (e.g. "Postgres" vs "postgresql").
+var datastoreDBSystem = map[string]string{
+	"mongodb":   "mongodb",
+	"memcached": "memcached",
+	"mysql":     "mysql",
+	"redis":     "redis",
+	"mssql":     "mssql",
+	"oracle":    "oracle",
+	"postgres":  "postgresql",
+	"sqlite":    "sqlite",
+	"firebird":  "firebird",
+	"odbc":      "other_sql",
+	"sybase":    "sybase",
+	"informix":  "informix",
+	"pdo":       "other_sql",
+	"dynamodb":  "dynamodb",
+}
+
+// addDatastoreSemanticAttrs enriches a datastore client span with `db.system`,
+// `db.name`, and peer host/port attributes under both the OTel semantic
+// conventions Splunk's backend-inference logic reads (`net.peer.name`/
+// `server.address`, `net.peer.port`/`server.port`) and preserves NR's own
+// legacy names (`component`, `db.instance`, `peer.hostname`, `peer.address`)
+// already merged onto the span for backward compatibility.
+func addDatastoreSemanticAttrs(attrs pcommon.Map, p *spanEventPayload) {
+	agentStr := func(k string) string {
+		if p.Agent == nil {
+			return ""
+		}
+		if v, ok := p.Agent[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+	intrinsicStr := func(k string) string {
+		if p.Intrinsics == nil {
+			return ""
+		}
+		if v, ok := p.Intrinsics[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+
+	if _, ok := attrs.Get("db.system"); !ok {
+		dbSystem := agentStr("db.system")
+		if dbSystem == "" {
+			if component := intrinsicStr("component"); component != "" {
+				if mapped, ok := datastoreDBSystem[strings.ToLower(component)]; ok {
+					dbSystem = mapped
+				} else {
+					dbSystem = strings.ToLower(component)
+				}
+			}
+		}
+		if dbSystem != "" {
+			attrs.PutStr("db.system", dbSystem)
+		}
+	}
+
+	if dbName := agentStr("db.instance"); dbName != "" {
+		attrs.PutStr("db.name", dbName)
+	}
+
+	if host := agentStr("peer.hostname"); host != "" && !strings.EqualFold(host, "unknown") {
+		attrs.PutStr("net.peer.name", host)
+		attrs.PutStr("server.address", host)
+	}
+	if addr := agentStr("peer.address"); addr != "" {
+		if _, portStr, err := net.SplitHostPort(addr); err == nil && portStr != "" && !strings.EqualFold(portStr, "unknown") {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				attrs.PutInt("net.peer.port", int64(port))
+				attrs.PutInt("server.port", int64(port))
+			}
+		}
+	}
 }
 
 func mergeAttrs(dst pcommon.Map, src map[string]any, skip map[string]struct{}, prefix string) {

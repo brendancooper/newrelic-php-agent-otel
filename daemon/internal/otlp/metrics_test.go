@@ -79,19 +79,20 @@ func TestBuildMetrics_MapsNRVector(t *testing.T) {
 	if dp0.Sum() != 1.25 {
 		t.Errorf("sum = %v, want 1.25", dp0.Sum())
 	}
-	if v, _ := dp0.Attributes().Get("php.transaction.name"); v.Str() != "WebTransaction/Function/index" {
-		t.Errorf("php.transaction.name = %q", v.AsString())
+	// php.transaction.name/scope and min/max must NOT be emitted as
+	// data-point attributes: they vary every harvest and would otherwise
+	// make each data point its own unique (unbounded-cardinality) series.
+	if _, ok := dp0.Attributes().Get("php.transaction.name"); ok {
+		t.Error("php.transaction.name should not be a data-point attribute")
 	}
-	// min/max preserved as attributes for downstream traceability
-	if v, _ := dp0.Attributes().Get("min"); v.Double() != 0.10 {
-		t.Errorf("min = %v, want 0.10", v.Double())
-	}
-	if v, _ := dp0.Attributes().Get("max"); v.Double() != 0.50 {
-		t.Errorf("max = %v, want 0.50", v.Double())
-	}
-	// Scope-less web-txn metric should NOT have a php.transaction.scope label.
 	if _, ok := dp0.Attributes().Get("php.transaction.scope"); ok {
-		t.Error("scope-less metric should not set php.transaction.scope")
+		t.Error("php.transaction.scope should not be a data-point attribute")
+	}
+	if _, ok := dp0.Attributes().Get("min"); ok {
+		t.Error("min should not be a data-point attribute")
+	}
+	if _, ok := dp0.Attributes().Get("max"); ok {
+		t.Error("max should not be a data-point attribute")
 	}
 	// Bounds/counts must be set so Splunk chart builder can interpolate.
 	if dp0.ExplicitBounds().Len() != len(otelLatencyBoundaries) {
@@ -130,9 +131,10 @@ func TestBuildMetrics_MapsNRVector(t *testing.T) {
 	if v, _ := dp1.Attributes().Get("db.operation"); v.Str() != "select" {
 		t.Errorf("db.operation = %q, want select", v.AsString())
 	}
-	// Scope of a child scope should be populated.
-	if v, _ := dp1.Attributes().Get("php.transaction.scope"); v.Str() != "WebTransaction/Function/index" {
-		t.Errorf("php.transaction.scope = %q", v.AsString())
+	// php.transaction.scope must not be emitted even when the record has a
+	// scope (unbounded-cardinality dimension).
+	if _, ok := dp1.Attributes().Get("php.transaction.scope"); ok {
+		t.Error("php.transaction.scope should not be a data-point attribute")
 	}
 }
 
