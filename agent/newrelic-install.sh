@@ -420,6 +420,21 @@ fi
 #   If this is set, it must be set to a valid New Relic license key, and this
 #   key will be set in the daemon config file.
 #
+# NR_INSTALL_OTEL_ENDPOINT
+#   Overrides the default OTLP/HTTP endpoint ("http://localhost:4318") used
+#   for the local OTel Collector that this fork ships profiling/trace/metric
+#   data to. Setting this skips the interactive endpoint prompt.
+#
+# NR_INSTALL_OTEL_SERVICE_NAME
+#   Sets newrelic.otel_service_name (OTEL_SERVICE_NAME) without prompting.
+#   Leave unset (and non-silent) to be prompted; leave blank/unset in
+#   silent mode to fall back to newrelic.appname.
+#
+# NR_INSTALL_OTEL_ENVIRONMENT
+#   Sets newrelic.otel_environment (OTEL_DEPLOYMENT_ENVIRONMENT) without
+#   prompting. Leave unset (and non-silent) to be prompted; leave blank/unset
+#   in silent mode to leave it unconfigured.
+#
 # NR_INSTALL_INITSCRIPT
 #   If set this must be the name under which the init script will be installed.
 #   This is usually something like /etc/init.d/newrelic-daemon. If no value is
@@ -1520,7 +1535,11 @@ install_agent_here() {
 # file exists in the target directory.
 #
     if [ -n "${pi_inidir_cli}" -a ! -f "${pi_inidir_cli}/newrelic.ini" ]; then
-      if sed -e "s/REPLACE_WITH_REAL_KEY/${nrkey}/" "${ilibdir}/scripts/newrelic.ini.template" > "${pi_inidir_cli}/newrelic.ini"; then
+      if sed -e "s/REPLACE_WITH_REAL_KEY/${nrkey}/" \
+             -e "s|REPLACE_WITH_OTEL_ENDPOINT|${nrotelendpoint}|" \
+             -e "s/REPLACE_WITH_OTEL_SERVICE_NAME/${nrotelsvcname}/" \
+             -e "s/REPLACE_WITH_OTEL_ENVIRONMENT/${nrotelenv}/" \
+             "${ilibdir}/scripts/newrelic.ini.template" > "${pi_inidir_cli}/newrelic.ini"; then
         logcmd chmod 644 "${pi_inidir_cli}/newrelic.ini"
         if [ -z "${NR_INSTALL_SILENT}" ]; then
           echo "      Install Status : ${pi_inidir_cli}/newrelic.ini created"
@@ -1532,7 +1551,11 @@ install_agent_here() {
     fi
 
     if [ -z "${istat}" -a -n "${pi_inidir_dso}" -a ! -f "${pi_inidir_dso}/newrelic.ini" ]; then
-      if sed -e "s/REPLACE_WITH_REAL_KEY/${nrkey}/" "${ilibdir}/scripts/newrelic.ini.template" > "${pi_inidir_dso}/newrelic.ini"; then
+      if sed -e "s/REPLACE_WITH_REAL_KEY/${nrkey}/" \
+             -e "s|REPLACE_WITH_OTEL_ENDPOINT|${nrotelendpoint}|" \
+             -e "s/REPLACE_WITH_OTEL_SERVICE_NAME/${nrotelsvcname}/" \
+             -e "s/REPLACE_WITH_OTEL_ENVIRONMENT/${nrotelenv}/" \
+             "${ilibdir}/scripts/newrelic.ini.template" > "${pi_inidir_dso}/newrelic.ini"; then
         logcmd chmod 644 "${pi_inidir_dso}/newrelic.ini"
         if [ -z "${NR_INSTALL_SILENT}" ]; then
           echo "      Install Status : ${pi_inidir_dso}/newrelic.ini created"
@@ -1678,6 +1701,33 @@ do_install() {
     nrkey="REPLACE_WITH_REAL_KEY"
   fi
 
+  #
+  # This fork assumes a local OTel Collector (OTLP/HTTP) by default. Prompt
+  # for/confirm the endpoint and gather service.name / deployment
+  # environment, unless overridden by the NR_INSTALL_OTEL_* env vars or
+  # running in silent mode.
+  #
+  : ${nrotelendpoint:="${NR_INSTALL_OTEL_ENDPOINT}"}
+  : ${nrotelendpoint:="http://localhost:4318"}
+  : ${nrotelsvcname:="${NR_INSTALL_OTEL_SERVICE_NAME}"}
+  : ${nrotelenv:="${NR_INSTALL_OTEL_ENVIRONMENT}"}
+
+  if [ -z "${NR_INSTALL_SILENT}" ]; then
+    echo ${en} "   OTel Collector endpoint [${nrotelendpoint}]: ${ec}"
+    read otelinput
+    [ -n "${otelinput}" ] && nrotelendpoint="${otelinput}"
+
+    if [ -z "${NR_INSTALL_OTEL_SERVICE_NAME}" ]; then
+      echo ${en} "   OTel service.name (or leave blank to use appname): ${ec}"
+      read nrotelsvcname
+    fi
+
+    if [ -z "${NR_INSTALL_OTEL_ENVIRONMENT}" ]; then
+      echo ${en} "   OTel deployment environment (or leave blank): ${ec}"
+      read nrotelenv
+    fi
+  fi
+
   if [ $numphp -gt 1 ]; then
     if [ -z "${NR_INSTALL_SILENT}" ]; then
       cat <<EOF
@@ -1782,6 +1832,47 @@ newrelic.license = \"${nrkey}\"
          else
           tmpifile="${ifile}.nr$$"
           sed -e "s/REPLACE_WITH_REAL_KEY/${nrkey}/" "${ifile}" > "${tmpifile}" 2> /dev/null && cp -f "${tmpifile}" "${ifile}" > /dev/null 2>&1 && rm -f "${tmpifile}" > /dev/null 2>&1
+        fi
+
+        #
+        # Likewise, if the file already exists and predates the OTel
+        # Collector settings, try to be helpful and insert them for the
+        # user, mirroring the license insertion logic above.
+        #
+        if ! grep -q '^[ 	]*newrelic.otel_endpoint' "${ifile}" > /dev/null 2>&1; then
+          if grep -q '^[ 	]*newrelic.logfile' "${ifile}" > /dev/null 2>&1; then
+            tmpifile="${ifile}.nr$$"
+            sed -e "/^[ 	]*newrelic.logfile/ a\\
+newrelic.otel_endpoint = \"${nrotelendpoint}\"\\
+newrelic.otel_service_name = \"${nrotelsvcname}\"\\
+newrelic.otel_environment = \"${nrotelenv}\"
+" "${ifile}" > "${tmpifile}" 2> /dev/null && cp -f "${tmpifile}" "${ifile}" > /dev/null 2>&1 && rm -f "${tmpifile}" > /dev/null 2>&1
+          elif grep -q '^[ 	]\[newrelic\]' "${ifile}" > /dev/null 2>&1; then
+            tmpifile="${ifile}.nr$$"
+            sed -e "/^[ 	]\[newrelic\]/ a\\
+newrelic.otel_endpoint = \"${nrotelendpoint}\"\\
+newrelic.otel_service_name = \"${nrotelsvcname}\"\\
+newrelic.otel_environment = \"${nrotelenv}\"
+" "${ifile}" > "${tmpifile}" 2> /dev/null && cp -f "${tmpifile}" "${ifile}" > /dev/null 2>&1 && rm -f "${tmpifile}" > /dev/null 2>&1
+          else
+            tffn="${ifile##*/}"
+            if [ "${tffn}" = "newrelic.ini" ]; then
+              echo "newrelic.otel_endpoint = \"${nrotelendpoint}\"" >> "${ifile}"
+              echo "newrelic.otel_service_name = \"${nrotelsvcname}\"" >> "${ifile}"
+              echo "newrelic.otel_environment = \"${nrotelenv}\"" >> "${ifile}"
+            else
+              sed -e "s|REPLACE_WITH_OTEL_ENDPOINT|${nrotelendpoint}|" \
+                  -e "s/REPLACE_WITH_OTEL_SERVICE_NAME/${nrotelsvcname}/" \
+                  -e "s/REPLACE_WITH_OTEL_ENVIRONMENT/${nrotelenv}/" \
+                  "${ilibdir}/scripts/newrelic.ini.template" >> "${ifile}"
+            fi
+          fi
+        else
+          tmpifile="${ifile}.nr$$"
+          sed -e "s|REPLACE_WITH_OTEL_ENDPOINT|${nrotelendpoint}|" \
+              -e "s/REPLACE_WITH_OTEL_SERVICE_NAME/${nrotelsvcname}/" \
+              -e "s/REPLACE_WITH_OTEL_ENVIRONMENT/${nrotelenv}/" \
+              "${ifile}" > "${tmpifile}" 2> /dev/null && cp -f "${tmpifile}" "${ifile}" > /dev/null 2>&1 && rm -f "${tmpifile}" > /dev/null 2>&1
         fi
       fi
     done

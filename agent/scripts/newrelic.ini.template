@@ -1469,12 +1469,17 @@ newrelic.daemon.logfile = "/var/log/newrelic/newrelic-daemon.log"
 ;          name (first segment of newrelic.appname, which is semicolon-
 ;          separated). Example: "php-checkout".
 ;
-;newrelic.otel_service_name = ""
+;          The install script (newrelic-install) prompts for this value
+;          (leave blank at the prompt to fall back to newrelic.appname).
+;
+newrelic.otel_service_name = "REPLACE_WITH_OTEL_SERVICE_NAME"
 
 ; Setting: newrelic.otel_endpoint
 ; Type   : string
 ; Scope  : per-directory
-; Default: none
+; Default: "http://localhost:4318" (the install script assumes a local OTel
+;          Collector listening for OTLP/HTTP; it prompts to confirm/override
+;          this value)
 ; Info   : Maps to OTEL_EXPORTER_OTLP_ENDPOINT. Base URL of the OTLP/HTTP
 ;          collector (the daemon appends /v1/logs). Both http:// and
 ;          https:// are supported. Example: "http://127.0.0.1:4318".
@@ -1486,15 +1491,16 @@ newrelic.daemon.logfile = "/var/log/newrelic/newrelic-daemon.log"
 ;          explicitly configured (true or false) elsewhere in your ini files,
 ;          in which case the explicit value always wins.
 ;
-;newrelic.otel_endpoint = ""
+newrelic.otel_endpoint = "REPLACE_WITH_OTEL_ENDPOINT"
 
 ; Setting: newrelic.otel_environment
 ; Type   : string
 ; Scope  : per-directory
 ; Default: none
-; Info   : Maps to OTEL_DEPLOYMENT_ENVIRONMENT (deployment.environment).
+; Info   : Maps to OTEL_DEPLOYMENT_ENVIRONMENT (deployment.environment). The
+;          install script prompts for this value (leave blank to skip).
 ;
-;newrelic.otel_environment = ""
+newrelic.otel_environment = "REPLACE_WITH_OTEL_ENVIRONMENT"
 
 ; Setting: newrelic.otel_service_version
 ; Type   : string
