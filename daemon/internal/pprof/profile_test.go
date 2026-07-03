@@ -54,6 +54,17 @@ const legacyThreeElementTraceData = `[
   ["WebTransaction/Function/index", "doWork"]
 ]`
 
+// clmTraceData carries a "doWork" segment with Code Level Metrics params
+// ("code.filepath"/"code.lineno"), as emitted by
+// agent/php_execute.c:nr_php_execute_segment_add_code_level_metrics when CLM
+// is enabled (or auto-enabled for OTLP profiling egress).
+const clmTraceData = `[
+  [0, {}, {}, [0, 2000, "` + "`" + `0", {}, [
+    [0, 9, "` + "`" + `1", {"code.filepath": "/var/www/app/Worker.php", "code.lineno": 42, "code.function": "doWork"}, []]
+  ]], {}],
+  ["WebTransaction/Function/index", "doWork"]
+]`
+
 func TestDecodeTrace(t *testing.T) {
 	tr, err := DecodeTrace([]byte(realTraceData), "WebTransaction/Function/index", 1_700_000_000_000)
 	if err != nil {
@@ -84,6 +95,33 @@ func TestDecodeTrace(t *testing.T) {
 	}
 	if tr.HasUnresolvedNames() {
 		t.Errorf("realTraceData should have no unresolved backtick names")
+	}
+}
+
+func TestDecodeTrace_CLMAttributes(t *testing.T) {
+	tr, err := DecodeTrace([]byte(clmTraceData), "WebTransaction/Function/index", 1_700_000_000_000)
+	if err != nil {
+		t.Fatalf("DecodeTrace: %v", err)
+	}
+	seg := tr.Root.Children[0]
+	if got, want := seg.Filepath, "/var/www/app/Worker.php"; got != want {
+		t.Errorf("Filepath = %q want %q", got, want)
+	}
+	if got, want := seg.Lineno, int64(42); got != want {
+		t.Errorf("Lineno = %d want %d", got, want)
+	}
+}
+
+func TestDecodeTrace_NoCLMAttributesLeavesZeroValues(t *testing.T) {
+	// realTraceData carries empty params objects (CLM disabled case): decoding
+	// must not error and must leave Filepath/Lineno zero-valued.
+	tr, err := DecodeTrace([]byte(realTraceData), "WebTransaction/Function/index", 1_700_000_000_000)
+	if err != nil {
+		t.Fatalf("DecodeTrace: %v", err)
+	}
+	seg := tr.Root.Children[0]
+	if seg.Filepath != "" || seg.Lineno != 0 {
+		t.Errorf("expected zero-valued Filepath/Lineno, got %q/%d", seg.Filepath, seg.Lineno)
 	}
 }
 
@@ -326,4 +364,68 @@ func keysOf(m map[string]struct{}) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestBuildProfile_CLMFilenameLine verifies that when a segment carries Code
+// Level Metrics params, BuildProfile surfaces them as the pprof
+// Function.Filename / Line.Line instead of the generic "php"/0 fallback.
+func TestBuildProfile_CLMFilenameLine(t *testing.T) {
+	tr, err := DecodeTrace([]byte(clmTraceData), "WebTransaction/Function/index", 1_700_000_000_000)
+	if err != nil {
+		t.Fatalf("DecodeTrace: %v", err)
+	}
+	p := BuildProfile(tr, TypeCPU, 10*time.Millisecond)
+
+	var foundFunc bool
+	for _, fn := range p.Function {
+		if fn.Name != "doWork" {
+			continue
+		}
+		foundFunc = true
+		if got, want := fn.Filename, "/var/www/app/Worker.php"; got != want {
+			t.Errorf("Function.Filename = %q want %q", got, want)
+		}
+	}
+	if !foundFunc {
+		t.Fatal("doWork Function not found in profile")
+	}
+
+	var foundLine bool
+	for _, loc := range p.Location {
+		for _, ln := range loc.Line {
+			if ln.Function.Name != "doWork" {
+				continue
+			}
+			foundLine = true
+			if got, want := ln.Line, int64(42); got != want {
+				t.Errorf("Line.Line = %d want %d", got, want)
+			}
+		}
+	}
+	if !foundLine {
+		t.Fatal("doWork Location not found in profile")
+	}
+}
+
+// TestBuildProfile_FallsBackToPhpFilenameWithoutCLM locks in the pre-existing
+// fallback behavior for segments without Code Level Metrics params (CLM
+// disabled, or internal/builtin PHP functions CLM doesn't cover).
+func TestBuildProfile_FallsBackToPhpFilenameWithoutCLM(t *testing.T) {
+	tr, err := DecodeTrace([]byte(realTraceData), "WebTransaction/Function/index", 1_700_000_000_000)
+	if err != nil {
+		t.Fatalf("DecodeTrace: %v", err)
+	}
+	p := BuildProfile(tr, TypeCPU, 10*time.Millisecond)
+	for _, fn := range p.Function {
+		if got, want := fn.Filename, "php"; got != want {
+			t.Errorf("Function %q Filename = %q want %q", fn.Name, got, want)
+		}
+	}
+	for _, loc := range p.Location {
+		for _, ln := range loc.Line {
+			if ln.Line != 0 {
+				t.Errorf("expected Line.Line=0 without CLM, got %d", ln.Line)
+			}
+		}
+	}
 }

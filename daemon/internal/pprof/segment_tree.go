@@ -38,6 +38,15 @@ type Segment struct {
 	StopMs     int64   // offset from trace start, in milliseconds
 	DurationMs float64 // stopMs - startMs
 	Children   []*Segment
+
+	// Filepath and Lineno carry the PHP source file / declaration line for
+	// this segment, sourced from the "code.filepath"/"code.lineno" Code
+	// Level Metrics agent attributes in the segment's params object (see
+	// agent/php_execute.c nr_php_execute_segment_add_code_level_metrics).
+	// Both are zero-valued when CLM is disabled or the segment doesn't carry
+	// them (e.g. internal/builtin PHP functions).
+	Filepath string
+	Lineno   int64
 }
 
 // Trace is a decoded transaction trace.
@@ -172,6 +181,20 @@ func decodeNode(raw json.RawMessage, resolve resolveName) (*Segment, error) {
 		StartMs:    int64(startMs),
 		StopMs:     int64(stopMs),
 		DurationMs: stopMs - startMs,
+	}
+
+	// params is index 3: an object that may carry Code Level Metrics agent
+	// attributes ("code.filepath", "code.lineno") alongside other typed
+	// attributes (sql, uri, ...) this package doesn't otherwise use. Absence
+	// of these keys (CLM disabled, or a segment CLM doesn't cover) is not an
+	// error; Filepath/Lineno simply stay zero-valued.
+	var params struct {
+		Filepath string `json:"code.filepath"`
+		Lineno   int64  `json:"code.lineno"`
+	}
+	if err := json.Unmarshal(node[3], &params); err == nil {
+		s.Filepath = params.Filepath
+		s.Lineno = params.Lineno
 	}
 
 	// children is index 4. It may be "null" or an empty array for a leaf.

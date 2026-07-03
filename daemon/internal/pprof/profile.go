@@ -45,27 +45,37 @@ func BuildProfile(t *Trace, profileType ProfileType, period time.Duration) *prof
 		SampleType:    []*profile.ValueType{{Type: string(profileType), Unit: "nanoseconds"}},
 	}
 
-	// Build the function/location tables keyed by segment name so identical
-	// names share IDs. New entries get incrementing IDs >= 1 (ID 0 is
-	// reserved and makes the profile malformed to go tool pprof).
+	// Build the function/location tables keyed by segment name+file+line so
+	// identical (name, filepath, lineno) triples share IDs. New entries get
+	// incrementing IDs >= 1 (ID 0 is reserved and makes the profile malformed
+	// to go tool pprof).
 	var funcs []*profile.Function
 	var locales []*profile.Location
 	locID := make(map[string]uint64)
 
-	// ensureEntry adds a Function + Location for a segment name if missing and
-	// returns the shared Location pointer.
-	ensureEntry := func(name string) *profile.Location {
-		if id, ok := locID[name]; ok {
+	// ensureEntry adds a Function + Location for a segment if missing and
+	// returns the shared Location pointer. Filename/line come from the
+	// segment's Code Level Metrics attributes when present (see
+	// Segment.Filepath/Lineno); segments without them (CLM disabled, or
+	// internal/builtin PHP functions) fall back to the generic "php"
+	// filename with no line, preserving prior behavior.
+	ensureEntry := func(seg *Segment) *profile.Location {
+		filename := seg.Filepath
+		if filename == "" {
+			filename = "php"
+		}
+		key := seg.Name + "\x00" + filename + "\x00" + strconv.FormatInt(seg.Lineno, 10)
+		if id, ok := locID[key]; ok {
 			return locales[id-1]
 		}
 		fid := uint64(len(funcs) + 1)
-		fn := &profile.Function{ID: fid, Name: name, SystemName: name, Filename: "php"}
+		fn := &profile.Function{ID: fid, Name: seg.Name, SystemName: seg.Name, Filename: filename}
 		funcs = append(funcs, fn)
 
 		lid := uint64(len(locales) + 1)
-		loc := &profile.Location{ID: lid, Line: []profile.Line{{Function: fn}}}
+		loc := &profile.Location{ID: lid, Line: []profile.Line{{Function: fn, Line: seg.Lineno}}}
 		locales = append(locales, loc)
-		locID[name] = lid
+		locID[key] = lid
 		return loc
 	}
 
@@ -76,7 +86,7 @@ func BuildProfile(t *Trace, profileType ProfileType, period time.Duration) *prof
 	addSample := func(path []*Segment) {
 		locs := make([]*profile.Location, 0, len(path))
 		for i := len(path) - 1; i >= 0; i-- { // path is leaf-first already
-			locs = append(locs, ensureEntry(path[i].Name))
+			locs = append(locs, ensureEntry(path[i]))
 		}
 
 		// Sample value = inclusive duration of the LEAF segment, in ns.

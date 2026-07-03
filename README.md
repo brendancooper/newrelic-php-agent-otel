@@ -212,8 +212,12 @@ newrelic.otel_exporter_headers  = "X-Splunk-Access-Token=..."
 ```
 
 `OTEL_EXPORTER_OTLP_ENDPOINT` (set via `newrelic.otel_endpoint`) is the master
-switch: it enables profiling + traces + metrics egress and defaults
-no-phone-home on. The full annotated list is in
+switch: it enables profiling + traces + metrics egress, defaults
+no-phone-home on, and also auto-enables Code Level Metrics
+(`newrelic.code_level_metrics.enabled`) so flamegraph frames carry
+file/line ("module") info — unless that setting is explicitly configured
+(true or false) in an ini file, in which case the explicit value always wins.
+The full annotated list is in
 [`agent/scripts/newrelic.ini.template`](./agent/scripts/newrelic.ini.template).
 
 #### Daemon-only env vars (no INI key)

@@ -967,6 +967,40 @@ void nr_php_execute_file(const zend_op_array* op_array,
 }
 
 /*
+ * Purpose : Report whether Code Level Metrics (source filepath/line-number
+ *           segment attributes) should be captured for this request.
+ *
+ * Note    : CLM is opt-in via `newrelic.code_level_metrics.enabled`, but it is
+ *           also the only source of per-function file/line information
+ *           available to the OTLP profiling pprof exporter (see
+ *           daemon/internal/pprof). When OTLP profiling egress is configured
+ *           (`newrelic.otel_endpoint` / OTEL_EXPORTER_OTLP_ENDPOINT), CLM is
+ *           auto-enabled so flamegraphs get file/line data without requiring
+ *           users to separately opt in, mirroring the existing
+ *           newrelic.otel_no_phone_home auto-default behavior.
+ *
+ *           If the user explicitly configures
+ *           newrelic.code_level_metrics.enabled (in php.ini/newrelic.ini/any
+ *           loaded ini file), that value always wins -- including an explicit
+ *           "false", which is the documented escape hatch for avoiding
+ *           oversized span/trace messages (see newrelic.ini.template). Only
+ *           when the setting is left unconfigured does OTLP profiling egress
+ *           auto-enable it.
+ */
+static inline bool nr_php_clm_explicitly_configured(void) {
+  return NULL
+         != cfg_get_entry("newrelic.code_level_metrics.enabled",
+                          sizeof("newrelic.code_level_metrics.enabled") - 1);
+}
+
+static inline bool nr_php_clm_enabled(void) {
+  if (nr_php_clm_explicitly_configured()) {
+    return NRINI(code_level_metrics_enabled);
+  }
+  return !nr_strempty(NR_PHP_PROCESS_GLOBALS(otel_endpoint));
+}
+
+/*
  * Purpose : Initialise a metadata structure from an op array.
  *
  * Params  : 1. A pointer to a metadata structure.
@@ -990,8 +1024,7 @@ static void nr_php_execute_metadata_init(nr_php_execute_metadata_t* metadata,
   } else {
     metadata->function = NULL;
   }
-  if (!NRINI(code_level_metrics_enabled)
-      || ZEND_USER_FUNCTION != op_array->type) {
+  if (!nr_php_clm_enabled() || ZEND_USER_FUNCTION != op_array->type) {
     metadata->filepath = NULL;
     return;
   }
@@ -1024,10 +1057,11 @@ static inline void nr_php_execute_segment_add_code_level_metrics(
     nr_segment_t* segment,
     const nr_php_execute_metadata_t* metadata) {
   /*
-   * Check if code level metrics are enabled in the ini.
-   * If they aren't, exit and don't add any attributes.
+   * Check if code level metrics are enabled (ini opt-in or auto-enabled for
+   * OTLP profiling egress). If they aren't, exit and don't add any
+   * attributes.
    */
-  if (!NRINI(code_level_metrics_enabled)) {
+  if (!nr_php_clm_enabled()) {
     return;
   }
 
@@ -1262,10 +1296,11 @@ static inline void nr_php_execute_segment_end(
     nr_php_execute_segment_add_metric(s, metadata, create_metric);
 
     /*
-     * Check if code level metrics are enabled in the ini.
-     * If they aren't, exit and don't create any CLM.
+     * Check if code level metrics are enabled (ini opt-in or auto-enabled
+     * for OTLP profiling egress). If they aren't, exit and don't create any
+     * CLM.
      */
-    if (NRINI(code_level_metrics_enabled)) {
+    if (nr_php_clm_enabled()) {
       nr_php_execute_segment_add_code_level_metrics(s, metadata);
     }
 

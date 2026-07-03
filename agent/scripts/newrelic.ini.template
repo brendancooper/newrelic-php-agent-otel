@@ -1364,10 +1364,25 @@ newrelic.daemon.logfile = "/var/log/newrelic/newrelic-daemon.log"
 ; Setting: newrelic.code_level_metrics.enabled
 ; Type   : boolean
 ; Scope  : per-directory
-; Default: false
+; Default: false, UNLESS newrelic.otel_endpoint is set and this setting is
+;          left unconfigured (commented out / absent from every loaded ini
+;          file), in which case it defaults to true.
 ; Info   : Toggles whether the agent provides function name, function
 ;          filepath, function namespace, and function lineno as
 ;          attributes on reported spans
+;
+;          This is also the source of the file/line ("module") information
+;          shown per-frame in Splunk AlwaysOn Profiling flamegraphs (the
+;          daemon's OTLP profiling exporter reads the code.filepath /
+;          code.lineno segment attributes).
+;
+;          Auto-enable behavior: if this setting is NOT explicitly present in
+;          any loaded ini file, it is auto-enabled whenever
+;          newrelic.otel_endpoint is set, so flamegraphs get file/line data
+;          with no extra configuration. If you DO set this explicitly --
+;          either "true" or "false" -- your value always wins, even with
+;          OTLP profiling configured; explicitly setting "false" is how you
+;          opt back out (see the size-limit note below).
 ;
 ;          !IMPORTANT: If you have Code Level Metrics enabled & long absolute
 ;          pathnames to your PHP files/functions, you may exceed the max message
@@ -1375,7 +1390,7 @@ newrelic.daemon.logfile = "/var/log/newrelic/newrelic-daemon.log"
 ;          too high. To fix this, you can either:
 ;           a) enable infinite tracing (newrelic.infinite_tracing.trace_observer.host)
 ;           b) set newrelic.code_level_metrics.enabled=false, disabling it
-;              entirely
+;              entirely (this also overrides the OTLP auto-enable above)
 ;           c) lower the value for newrelic.span_events.max_samples_stored
 ;
 ;newrelic.code_level_metrics.enabled = false
@@ -1465,7 +1480,11 @@ newrelic.daemon.logfile = "/var/log/newrelic/newrelic-daemon.log"
 ;          https:// are supported. Example: "http://127.0.0.1:4318".
 ;          Setting this is what enables the OTLP profiling egress and the
 ;          "no phone home" path (unless newrelic.otel_no_phone_home is
-;          explicitly disabled below).
+;          explicitly disabled below). It also auto-enables Code Level
+;          Metrics (newrelic.code_level_metrics.enabled) so profiling
+;          flamegraph frames carry file/line info, unless that setting is
+;          explicitly configured (true or false) elsewhere in your ini files,
+;          in which case the explicit value always wins.
 ;
 ;newrelic.otel_endpoint = ""
 
