@@ -6,7 +6,14 @@
 # Canonical list of supported PHP versions (ascending order).
 # This is the single source of truth — update this when adding
 # or removing PHP version support.
-PHP_VERSIONS := 7.2 7.3 7.4 8.0 8.1 8.2 8.3 8.4 8.5
+#
+# Note: PHP 7.2/7.3 are intentionally NOT here. They are years past EOL, and
+# our release workflow builds inside a rockylinux:9 container whose Remi EL9
+# channel never carried php72-php/php73-php (those only ever shipped in Remi's
+# EL7/EL8 channels). Supporting them again would require either a separate
+# EL8 container matrix lane or building PHP from source — see the comment on
+# the release workflow's build-agent job. Until that's wanted, drop them.
+PHP_VERSIONS := 7.4 8.0 8.1 8.2 8.3 8.4 8.5
 
 # PHP versions supported on arm64 (8.0+)
 PHP_VERSIONS_ARM64 := $(filter 8.%, $(PHP_VERSIONS))
