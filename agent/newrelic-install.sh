@@ -583,6 +583,14 @@ add_to_path /usr/php/8.3/bin
 add_to_path /usr/php/8.4/bin
 add_to_path /usr/php/8.5/bin
 
+add_to_path /opt/remi/php73/root/usr/bin
+add_to_path /opt/remi/php74/root/usr/bin
+add_to_path /opt/remi/php80/root/usr/bin
+add_to_path /opt/remi/php81/root/usr/bin
+add_to_path /opt/remi/php82/root/usr/bin
+add_to_path /opt/remi/php83/root/usr/bin
+add_to_path /opt/remi/php84/root/usr/bin
+add_to_path /opt/remi/php85/root/usr/bin
 add_to_path /opt/php/bin
 add_to_path /opt/zend/bin
 
