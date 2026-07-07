@@ -1,6 +1,14 @@
 #
-# Build and publish otel-php-agent GitHub Releases, all natively on GitHub
-# hosted runners (no Docker / builder images).
+# Build and publish otel-php-agent GitHub Releases.
+#
+# Why Rocky Linux 9 (not Ubuntu/Debian)? The release artifacts must run on the
+# oldest supported production target, which ships glibc 2.34. GitHub-hosted
+# Ubuntu runners ship glibc 2.39 (Ubuntu 24.04 / "latest"), so anything linked
+# there (the agent .so, the C iutil helper, and the cgo-linked Go daemon)
+# records GLIBC_2.38+ symbol requirements and refuses to load on the target.
+# Rocky Linux 9 ships glibc 2.34, so building inside a rockylinux:9 container
+# caps every artifact's required glibc at 2.34. This is the only reason for the
+# container: every native build / link step runs inside it.
 #
 # Produces, per architecture, a self-contained release tarball matching the
 # contract documented in README.md and consumed by agent/install.sh:
@@ -9,17 +17,21 @@
 #   otel-php-agent_<version>_linux_<arch>.tar.gz.sha256
 #
 # Per arch the workflow:
-#   1. builds the agent C extension for every supported PHP version on the
-#      matching hosted runner (PHP provided by shivammathur/setup-php), each
-#      run staging a `newrelic-<PHP_API_VERSION>.so` into a per-job artifact,
-#   2. (assemble) builds the libc/arch-matched `newrelic-install` +
-#      `newrelic-iutil` (C helper) and the Go daemon natively on the same
-#      runner, drops all the staged agent .so files into the bundle, then runs
-#      `make release-tarball` (which only *stages* already-built artifacts),
+#   1. builds the agent C extension for every supported PHP version inside a
+#      rockylinux:9 container (PHP provided by the Remi repository's parallel
+#      SCL-style phpNN-php packages), each run staging a
+#      `newrelic-<PHP_API_VERSION>.so` into a per-job artifact,
+#   2. (assemble) inside another rockylinux:9 container builds the libc/arch
+#      -matched `newrelic-install` + `newrelic-iutil` (C helper) and the Go
+#      daemon natively, drops all the staged agent .so files into the bundle,
+#      then runs `make release-tarball` (which only *stages* already-built
+#      artifacts),
 #   3. uploads the tarball + sha256 as a job artifact.
 #
 # A final `publish` job downloads every asset and creates the GitHub Release
-# (auto on tag push `v*`, or draft on manual dispatch).
+# (auto on tag push `v*`, or draft on manual dispatch). `meta` (matrix
+# resolution) and `publish` compile/link nothing, so they stay on plain
+# GitHub-hosted runners — the glibc-pinning concerns only the build jobs.
 #
 # v1 limitation: only glibc (gnu) Linux tarballs are produced (linux_amd64,
 # linux_arm64). musl/Alpine tarballs are not built natively — there is no
@@ -51,23 +63,35 @@ on:
         default: true
         type: boolean
 
-# Build dependencies installed via apt (kept aligned across the agent- and
-# assemble-runner jobs). protobuf-c (libprotobuf-c.a + protoc-c) and libpcre
-# are the two real native deps of axiom / the agent extension.
-# libpcre is built statically from source (see build-agent) so the agent
-# extension embeds it and has no libpcre runtime dependency — Debian's
-# libpcre soname is libpcre.so.3 while RHEL's is libpcre.so.1, so a
-# shared-linked extension built on Ubuntu would not load on RHEL.
+# All env vars below are consumed by the container-based build jobs.
 env:
-  APT_DEPS_AGENT: >-
-    build-essential make git autoconf automake libtool pkg-config gawk
-    libprotobuf-c-dev protobuf-c-compiler ca-certificates curl
-  APT_DEPS_ASSEMBLE: >-
-    build-essential make git pkg-config
-  # pcre 8.x (the pcre1 ABI axiom links against). Pinned so the release
-  # is reproducible; bump here when updating.
-  PCRE_VERSION: "8.45"
-  PCRE_URL: "https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz/download"
+# Build dependencies installed via dnf on the Rocky Linux 9 container.
+# - libpcre is built statically from source (see build-agent) so the agent
+#   extension embeds it and has no libpcre runtime dependency — the soname
+#   differs across distros (libpcre.so.3 on Debian, libpcre.so.1 on RHEL), so a
+#   shared-linked extension built for one would not load on the other.
+# - protobuf-c is likewise built statically from a pinned source tarball
+#   (Rocky's CRB lacks a libprotobuf-c pkg, and the agent build system assumes
+#   libprotobuf-c lives under $prefix/lib). Its build needs protobuf's protoc +
+#   libprotobuf, pulled from Rocky 9 CRB.
+# - Per-PHP-version PHP comes from Remi's parallel SCL-style packages
+#   (phpNN-php / phpNN-php-devel), which install under /opt/remi/phpNN.
+DNF_BASE_DEPS: >-
+  gcc gcc-c++ make git pkg-config gawk ca-certificates curl tar
+DNF_AGENT_BUILD_DEPS: >-
+  autoconf automake libtool
+DNF_PROTOBUF_BUILD_DEPS: >-
+  protobuf-compiler protobuf-devel
+# Rocky Linux 9 container. Tag (not digest) is pinned to the major release so
+# we always get the latest 9.x security refresh; bump here when moving to a
+# newer Rocky release (and re-confirm the glibc baseline it ships).
+ROCKY_IMAGE: "rockylinux:9"
+# Vendor deps built statically from source (pinned so the release is
+# reproducible; bump here when updating).
+PCRE_VERSION: "8.45"
+PCRE_URL: "https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz/download"
+PROTOBUF_C_VERSION: "1.5.0"
+PROTOBUF_C_URL: "https://github.com/protobuf-c/protobuf-c/releases/download/v1.5.0/protobuf-c-1.5.0.tar.gz"
 
 jobs:
   meta:
@@ -98,6 +122,8 @@ jobs:
     name: agent (${{ matrix.arch }} PHP ${{ matrix.php }})
     needs: meta
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    container:
+      image: ${{ env.ROCKY_IMAGE }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,10 +143,31 @@ jobs:
           esac
           echo "int=$int" >> "$GITHUB_OUTPUT"
 
-      - name: Install build dependencies
+      # Enable CodeReady Builder (for protobuf protoc + libprotobuf) and the
+      # Remi repository (for parallel SCL-style PHP packages). EPEL is not
+      # needed: pcre and protobuf-c are both built from source below.
+      - name: Enable Rocky repos + install build deps + PHP
+        env:
+          PHP_VERSION: ${{ matrix.php }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.APT_DEPS_AGENT }}
+          set -e
+          short=$(printf '%s' "$PHP_VERSION" | tr -d .)
+          echo "Resolved Remi PHP channel: php${short} (from ${PHP_VERSION})"
+          dnf -y install dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf -y install https://rpms.remirepo.net/enterprise/remi-release-9.rpm
+          dnf config-manager --set-enabled remi
+          dnf -y install \
+            ${{ env.DNF_BASE_DEPS }} \
+            ${{ env.DNF_AGENT_BUILD_DEPS }} \
+            ${{ env.DNF_PROTOBUF_BUILD_DEPS }} \
+            "php${short}-php" "php${short}-php-devel"
+          # Remi installs each PHP into /opt/remi/phpNN; expose its bin dir to
+          # later steps so the agent build can find php-config / phpize.
+          php_bin="/opt/remi/php${short}/root/usr/bin"
+          test -x "$php_bin/php-config" -a -x "$php_bin/phpize"
+          echo "PHP_BIN_DIR=$php_bin" >> "$GITHUB_ENV"
+          "$php_bin/php-config" --version
 
       - name: Build static libpcre (portable extension linkage)
         run: |
@@ -139,20 +186,37 @@ jobs:
           # `pcre-config`) picks up, so its headers match the static lib.
           echo "$PWD/../pcre-prefix/bin" >> "$GITHUB_PATH"
 
-      - name: Setup PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: ${{ matrix.php }}
-          coverage: none
-          tools: none
+      - name: Build static protobuf-c (pinned, into a controlled prefix)
+        run: |
+          set -e
+          mkdir -p pb && cd pb
+          curl -fsSL -o pb.tar.gz "${PROTOBUF_C_URL}"
+          tar xzf pb.tar.gz
+          cd "protobuf-c-${PROTOBUF_C_VERSION}"
+          # protoc + libprotobuf come from Rocky CRB (protobuf-compiler /
+          # protobuf-devel); locate them via pkg-config.
+          ./configure \
+            --prefix="$PWD/../pb-prefix" \
+            --disable-shared --enable-static --with-pic
+          make -j"$(nproc 2>/dev/null || echo 2)"
+          make install
+          test -x "$PWD/../pb-prefix/bin/protoc-c"
+          test -s "$PWD/../pb-prefix/lib/libprotobuf-c.a"
 
       - name: Build agent (stages newrelic-<phpapi>.so)
+        env:
+          # PHP_BIN_DIR was exported by the repo+deps step above.
+          PHP_BIN_DIR: ${{ env.PHP_BIN_DIR }}
         run: |
+          set -e
           make agent-for-release \
             RELEASE_OS=linux \
             RELEASE_ARCH=${{ steps.arch.outputs.int }} \
+            PHP_CONFIG="$PHP_BIN_DIR/php-config" \
+            PHPIZE="$PHP_BIN_DIR/phpize" \
             PCRE_PREFIX="$PWD/pcre/pcre-prefix" \
-            PCRE_STATIC=yes
+            PCRE_STATIC=yes \
+            PROTOBUF_C_PREFIX="$PWD/pb/pb-prefix"
 
       - name: Save staged extension
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
@@ -165,6 +229,8 @@ jobs:
     name: assemble (${{ matrix.arch }})
     needs: build-agent
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    container:
+      image: ${{ env.ROCKY_IMAGE }}
     strategy:
       fail-fast: false
       matrix:
@@ -191,10 +257,13 @@ jobs:
           echo "version=$ver"      >> "$GITHUB_OUTPUT"
           echo "int_arch=$int_arch" >> "$GITHUB_OUTPUT"
 
+      # Assemble only needs gcc (for newrelic-iutil), make, git (VERSION/COMMIT
+      # derivation), and Go (added by actions/setup-go below). No CRB/EPEL/Remi
+      # repos are required for the assemble step.
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.APT_DEPS_ASSEMBLE }}
+          set -e
+          dnf -y install ${{ env.DNF_BASE_DEPS }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
