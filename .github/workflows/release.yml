@@ -65,33 +65,40 @@ on:
 
 # All env vars below are consumed by the container-based build jobs.
 env:
-# Build dependencies installed via dnf on the Rocky Linux 9 container.
-# - libpcre is built statically from source (see build-agent) so the agent
-#   extension embeds it and has no libpcre runtime dependency — the soname
-#   differs across distros (libpcre.so.3 on Debian, libpcre.so.1 on RHEL), so a
-#   shared-linked extension built for one would not load on the other.
-# - protobuf-c is likewise built statically from a pinned source tarball
-#   (Rocky's CRB lacks a libprotobuf-c pkg, and the agent build system assumes
-#   libprotobuf-c lives under $prefix/lib). Its build needs protobuf's protoc +
-#   libprotobuf, pulled from Rocky 9 CRB.
-# - Per-PHP-version PHP comes from Remi's parallel SCL-style packages
-#   (phpNN-php / phpNN-php-devel), which install under /opt/remi/phpNN.
-DNF_BASE_DEPS: >-
-  gcc gcc-c++ make git pkg-config gawk ca-certificates curl tar
-DNF_AGENT_BUILD_DEPS: >-
-  autoconf automake libtool
-DNF_PROTOBUF_BUILD_DEPS: >-
-  protobuf-compiler protobuf-devel
-# Rocky Linux 9 container. Tag (not digest) is pinned to the major release so
-# we always get the latest 9.x security refresh; bump here when moving to a
-# newer Rocky release (and re-confirm the glibc baseline it ships).
-ROCKY_IMAGE: "rockylinux:9"
-# Vendor deps built statically from source (pinned so the release is
-# reproducible; bump here when updating).
-PCRE_VERSION: "8.45"
-PCRE_URL: "https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz/download"
-PROTOBUF_C_VERSION: "1.5.0"
-PROTOBUF_C_URL: "https://github.com/protobuf-c/protobuf-c/releases/download/v1.5.0/protobuf-c-1.5.0.tar.gz"
+  # Build dependencies installed via dnf on the Rocky Linux 9 container.
+  # - libpcre is built statically from source (see build-agent) so the agent
+  #   extension embeds it and has no libpcre runtime dependency — the soname
+  #   differs across distros (libpcre.so.3 on Debian, libpcre.so.1 on RHEL), so a
+  #   shared-linked extension built for one would not load on the other.
+  # - protobuf-c is likewise built statically from a pinned source tarball
+  #   (Rocky's CRB lacks a libprotobuf-c pkg, and the agent build system assumes
+  #   libprotobuf-c lives under $prefix/lib). Its build needs protobuf's protoc +
+  #   libprotobuf, pulled from Rocky 9 CRB.
+  # - Per-PHP-version PHP comes from Remi's parallel SCL-style packages
+  #   (phpNN-php / phpNN-php-devel), which install under /opt/remi/phpNN.
+  DNF_BASE_DEPS: >-
+    gcc gcc-c++ make git pkg-config gawk ca-certificates tar
+  # NOTE: do NOT add the full `curl` package here — the rockylinux:9 base
+  # image ships `curl-minimal`, which conflicts with `curl`. curl-minimal
+  # provides /usr/bin/curl (used by the pcre/protobuf-c download steps), so
+  # no explicit curl package is needed.
+  DNF_AGENT_BUILD_DEPS: >-
+    autoconf automake libtool
+  DNF_PROTOBUF_BUILD_DEPS: >-
+    protobuf-compiler protobuf-devel
+  # Rocky Linux 9 container the build jobs run in. The image string is repeated
+  # at each job's `container.image` because GitHub does not expose the `env`
+  # context at the job-level `container:` key. Tag (not digest) is pinned to
+  # the major release so we always get the latest 9.x security refresh; bump
+  # here when moving to a newer Rocky release (and re-confirm its glibc
+  # baseline). Keep this and the inline `container.image` literals in sync.
+  ROCKY_IMAGE: "rockylinux:9"
+  # Vendor deps built statically from source (pinned so the release is
+  # reproducible; bump here when updating).
+  PCRE_VERSION: "8.45"
+  PCRE_URL: "https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz/download"
+  PROTOBUF_C_VERSION: "1.5.0"
+  PROTOBUF_C_URL: "https://github.com/protobuf-c/protobuf-c/releases/download/v1.5.0/protobuf-c-1.5.0.tar.gz"
 
 jobs:
   meta:
@@ -123,7 +130,7 @@ jobs:
     needs: meta
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container:
-      image: ${{ env.ROCKY_IMAGE }}
+      image: rockylinux:9
     strategy:
       fail-fast: false
       matrix:
@@ -230,7 +237,7 @@ jobs:
     needs: build-agent
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container:
-      image: ${{ env.ROCKY_IMAGE }}
+      image: rockylinux:9
     strategy:
       fail-fast: false
       matrix:
