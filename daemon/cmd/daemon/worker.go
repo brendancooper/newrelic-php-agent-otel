@@ -241,6 +241,28 @@ func listenAndServe(ctx context.Context, address string, errorChan chan<- error,
 			return
 		}
 
+		// Log exactly what kind of socket is being bound. Abstract sockets are
+		// scoped to a single network namespace on Linux, which is the most common
+		// reason an agent and daemon that are both running cannot see each other:
+		// a daemon bound on the host and a PHP-FPM running in a container land in
+		// different namespaces and the abstract socket name simply does not exist
+		// in both.
+		if ua, ok := addr.(*net.UnixAddr); ok {
+			if strings.HasPrefix(ua.String(), "@") {
+				msg := fmt.Sprintf("listener: binding Linux ABSTRACT unix socket %q (network=%s) in pid=%d",
+					ua.String(), ua.Net, os.Getpid())
+				if ns, e := os.Readlink("/proc/self/ns/net"); e == nil {
+					msg += " netns=" + ns
+				}
+				log.Infof(msg)
+			} else {
+				log.Infof("listener: binding filesystem unix socket %q (network=%s)",
+					ua.String(), ua.Net)
+			}
+		} else {
+			log.Infof("listener: binding %s socket %s", addr.Network(), addr.String())
+		}
+
 		if addr.Network() == "unix" && !strings.HasPrefix(addr.String(), "@") {
 			err := os.Remove(addr.String())
 			if err != nil && !os.IsNotExist(err) {
@@ -256,6 +278,15 @@ func listenAndServe(ctx context.Context, address string, errorChan chan<- error,
 		list, err := newrelic.Listen(addr.Network(), addr.String())
 		if err != nil {
 			respawn := true
+
+			// Emit a tailored, high-signal message for the common single-machine
+			// abstract-socket failure modes so it is not buried in the generic
+			// error also logged below.
+			if ua, ok := addr.(*net.UnixAddr); ok &&
+				strings.HasPrefix(ua.String(), "@") {
+				log.Errorf("listener: failed to bind abstract socket %q - another newrelic-daemon (or another listener in this network namespace) may already be holding it.",
+					ua.String())
+			}
 
 			// Some older RHEL 5.x linux kernels incorrectly handle missing system
 			// calls (here: epoll_create1), which manifests as an EBADF error when
