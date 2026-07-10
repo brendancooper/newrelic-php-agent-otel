@@ -568,6 +568,19 @@ PHP_MINIT_FUNCTION(newrelic) {
   daemon_connect_succeeded
       = nr_agent_try_daemon_connect(NR_PHP_MINIT_DAEMON_CONNECTION_TIMEOUT_MS);
 
+  if (0 != daemon_connect_succeeded) {
+    nrl_info(NRL_INIT, "daemon connect to '%s' succeeded",
+             daemon_address);
+  } else {
+    nrl_info(NRL_INIT,
+             "daemon connect to '%s' failed after %d ms; will retry%s",
+             daemon_address,
+             NR_PHP_MINIT_DAEMON_CONNECTION_TIMEOUT_MS,
+             (NR_DAEMON_STARTUP_AGENT == daemon_startup_mode)
+                 ? " and spawn the daemon"
+                 : "");
+  }
+
   if (0 == daemon_connect_succeeded) {
     if (NR_DAEMON_STARTUP_AGENT == daemon_startup_mode) {
       nr_daemon_args_t daemon_args;

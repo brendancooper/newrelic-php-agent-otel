@@ -327,10 +327,10 @@ check_file "${ilibdir}/scripts/newrelic.ini.template"
 # MAKE SURE TO UPDATE THIS LIST WHENEVER SUPPORT IS ADDED OR REMOVED
 # FOR A PHP VERSION
 # Currently supported versions:
-#    (7.2, 7.3, 7.4)
+#    (7.4)
 # for x64
 if [ ${arch} = x64 ]; then
-for pmv in "20170718" "20180731" "20190902"; do
+for pmv in "20190902"; do
   check_file "${ilibdir}/agent/${arch}/newrelic-${pmv}.so"
 done
 fi
@@ -583,6 +583,14 @@ add_to_path /usr/php/8.3/bin
 add_to_path /usr/php/8.4/bin
 add_to_path /usr/php/8.5/bin
 
+add_to_path /opt/remi/php73/root/usr/bin
+add_to_path /opt/remi/php74/root/usr/bin
+add_to_path /opt/remi/php80/root/usr/bin
+add_to_path /opt/remi/php81/root/usr/bin
+add_to_path /opt/remi/php82/root/usr/bin
+add_to_path /opt/remi/php83/root/usr/bin
+add_to_path /opt/remi/php84/root/usr/bin
+add_to_path /opt/remi/php85/root/usr/bin
 add_to_path /opt/php/bin
 add_to_path /opt/zend/bin
 
@@ -1061,12 +1069,6 @@ for this copy of PHP. We apologize for the inconvenience.
   fi
 
   case "${pi_ver}" in
-    7.2.*)
-      ;;
-
-    7.3.*)
-      ;;
-
     7.4.*)
       ;;
 
@@ -1267,8 +1269,6 @@ does not exist. This particular instance of PHP will be skipped.
 #
   pi_modver=
   case "${pi_ver}" in
-    7.2.*)  pi_modver="20170718" ;;
-    7.3.*)  pi_modver="20180731" ;;
     7.4.*)  pi_modver="20190902" ;;
     8.0.*)  pi_modver="20200930" ;;
     8.1.*)  pi_modver="20210902" ;;

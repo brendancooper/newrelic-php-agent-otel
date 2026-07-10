@@ -162,7 +162,7 @@ func harvestProfiles(traces *TxnTraces, exp *otlp.Exporter, profileType pprof.Pr
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := exp.ExportProfiles(ctx, records, harvestStart); err != nil {
-		log.Warnf("otlp: export profiles failed: %v", err)
+		log.Errorf("otlp: failed to export %d profile(s) to %s: %v", len(records), cfg.Endpoint, err)
 	}
 }
 
