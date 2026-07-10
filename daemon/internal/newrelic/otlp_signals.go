@@ -39,7 +39,7 @@ func harvestTraces(events *SpanEvents, exp *otlp.Exporter, harvestStart time.Tim
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := exp.ExportTraces(ctx, td, harvestStart); err != nil {
-		log.Warnf("otlp: export traces failed: %v", err)
+		log.Errorf("otlp: failed to export %d span(s) to %s: %v", td.SpanCount(), cfg.Endpoint, err)
 	}
 }
 
@@ -59,7 +59,7 @@ func harvestMetricsOTLP(metrics *MetricTable, exp *otlp.Exporter, harvestStart t
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := exp.ExportMetrics(ctx, md, harvestStart); err != nil {
-		log.Warnf("otlp: export metrics failed: %v", err)
+		log.Errorf("otlp: failed to export %d metric point(s) to %s: %v", md.DataPointCount(), cfg.Endpoint, err)
 	}
 }
 
