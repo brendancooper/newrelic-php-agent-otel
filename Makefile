@@ -199,6 +199,11 @@ daemon_test:
 daemon_smoke:
 	$(MAKE) -C daemon smoke
 
+# Send synthetic records directly into a running newrelic-daemon socket.
+.PHONY: daemon_probe
+daemon_probe:
+	$(MAKE) -C daemon probe
+
 .PHONY: daemon_bench
 daemon_bench:
 	$(MAKE) -C daemon bench
