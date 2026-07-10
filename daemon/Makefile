@@ -83,10 +83,4 @@ test:
 smoke:
 	$(GO) run $(GOFLAGS) $(GO_MODULE)/cmd/smoke
 
-# probe sends synthetic records directly into a running newrelic-daemon
-# socket to verify it is alive and accepting/processing agent data.
-# An in-tree binary: built via `make` and run as `probe [--port @newrelic]`.
-.PHONY: probe
-probe:
-	$(GO) run $(GOFLAGS) $(GO_MODULE)/cmd/probe
 
