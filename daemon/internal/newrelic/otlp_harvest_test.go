@@ -1,6 +1,7 @@
 package newrelic
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -30,6 +31,16 @@ const realTraceData = `[
 ]`
 
 func TestLocalConnect_SynthesizesConnectedReply(t *testing.T) {
+	var reply struct {
+		CollectTraces bool `json:"collect_traces"`
+	}
+	if err := json.Unmarshal(syntheticConnectReply("test"), &reply); err != nil {
+		t.Fatalf("unmarshal synthetic connect reply: %v", err)
+	}
+	if !reply.CollectTraces {
+		t.Fatal("synthetic connect reply must enable collect_traces")
+	}
+
 	args := &ConnectArgs{
 		AppKey: AppKey{License: "x", Appname: "test"},
 	}

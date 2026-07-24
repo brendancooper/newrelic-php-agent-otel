@@ -100,6 +100,7 @@ func syntheticConnectReply(id AgentRunID) []byte {
 		SpanEventHarvest    spanHarvest  `json:"span_event_harvest_config"`
 		SamplingFrequency   int          `json:"sampling_target_period_in_seconds"`
 		SamplingTarget      int          `json:"sampling_target"`
+		CollectTraces       bool         `json:"collect_traces"`
 		MaxPayloadSizeBytes int          `json:"max_payload_size_in_bytes"`
 	}
 	reportPeriodMs := uint64(limits.DefaultReportPeriod / time.Millisecond)
@@ -118,6 +119,7 @@ func syntheticConnectReply(id AgentRunID) []byte {
 		SpanEventHarvest:    spanHarvest{ReportPeriodMS: reportPeriodMs, SpanEventData: &spanDefault},
 		SamplingFrequency:   60,
 		SamplingTarget:      10,
+		CollectTraces:       true,
 		MaxPayloadSizeBytes: limits.DefaultMaxPayloadSizeInBytes,
 	}
 	b, _ := json.Marshal(r)

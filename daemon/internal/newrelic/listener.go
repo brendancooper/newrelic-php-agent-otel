@@ -29,7 +29,7 @@ import (
 //   * Writing any reply created by the AgentDataHandler
 
 const (
-	maxMessageSize = 2 << 20 /* 2 MB */
+	maxMessageSize = 3 << 20 /* 3 MiB */
 	msgHeaderSize  = 8
 )
 
